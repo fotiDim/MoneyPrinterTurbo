@@ -678,23 +678,26 @@ def _generate_final_videos_with_remotion(
     video_music_provider,
     video_music_requested,
 ):
-    """Remotion 全量合成：先画面轨，再按需配乐，最后旁白/字幕/BGM 成片。"""
+    """Remotion 全量合成：脚手架独立项目，先画面轨，再按需配乐，最后成片。"""
     remotion.ensure_ready()
     final_video_paths = []
     combined_video_paths = []
+    remotion_project_paths = []
     warnings = []
     progress = 50
 
     for i in range(params.video_count):
         index = i + 1
+        project_path = remotion.scaffold_project(task_id, index)
         combined_video_path = path.join(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
         logger.info(
-            f"\n\n## Remotion combining video: {index} => {combined_video_path}"
+            f"\n\n## Remotion combining video: {index} => {combined_video_path} "
+            f"(project={project_path})"
         )
-        _, clips = remotion.render_composition(
+        _, clips, project_path = remotion.render_composition(
             task_id=task_id,
             index=index,
             video_paths=downloaded_videos,
@@ -706,6 +709,7 @@ def _generate_final_videos_with_remotion(
             video_transition_mode=video_transition_mode,
             output_file=combined_video_path,
             visual_only=True,
+            project_path=project_path,
         )
         progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=progress)
@@ -738,6 +742,7 @@ def _generate_final_videos_with_remotion(
                 visual_only=False,
                 bgm_path=bgm_path,
                 clips=clips,
+                project_path=project_path,
             )
         except remotion.RemotionRenderError:
             if video_music_provider is not None and bgm_path:
@@ -760,6 +765,7 @@ def _generate_final_videos_with_remotion(
                     visual_only=False,
                     bgm_path="",
                     clips=clips,
+                    project_path=project_path,
                 )
                 warnings.append(
                     {
@@ -774,8 +780,9 @@ def _generate_final_videos_with_remotion(
         sm.state.update_task(task_id, progress=progress)
         final_video_paths.append(final_video_path)
         combined_video_paths.append(combined_video_path)
+        remotion_project_paths.append(project_path)
 
-    return final_video_paths, combined_video_paths, warnings
+    return final_video_paths, combined_video_paths, warnings, remotion_project_paths
 
 
 def generate_final_videos(
@@ -880,7 +887,7 @@ def generate_final_videos(
         final_video_paths.append(final_video_path)
         combined_video_paths.append(combined_video_path)
 
-    return final_video_paths, combined_video_paths, warnings
+    return final_video_paths, combined_video_paths, warnings, []
 
 
 def _patch_cross_post_state(task_id: str, **kwargs) -> bool | None:
@@ -1367,7 +1374,12 @@ def _run_pipeline(
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
-    final_video_paths, combined_video_paths, generation_warnings = generate_final_videos(
+    (
+        final_video_paths,
+        combined_video_paths,
+        generation_warnings,
+        remotion_project_paths,
+    ) = generate_final_videos(
         task_id,
         params,
         downloaded_videos,
@@ -1408,6 +1420,7 @@ def _run_pipeline(
     kwargs = {
         "videos": final_video_paths,
         "combined_videos": combined_video_paths,
+        "remotion_projects": remotion_project_paths or None,
         "script": video_script,
         "terms": video_terms,
         "audio_file": audio_file,

@@ -1,7 +1,16 @@
 import React from 'react';
 import {Composition} from 'remotion';
 import {MoneyPrinterVideo} from './MoneyPrinterVideo';
-import {defaultProps, type MoneyPrinterProps} from './types';
+import {defaultProps as fallbackProps, type MoneyPrinterProps} from './types';
+import inputPropsJson from '../input-props.json';
+
+// Per-task projects stage real data into input-props.json. Importing it as
+// defaultProps makes Studio show the video without requiring --props (which
+// also locks the sidebar against visual edits).
+const studioDefaultProps = {
+  ...fallbackProps,
+  ...(inputPropsJson as MoneyPrinterProps),
+} satisfies MoneyPrinterProps;
 
 export const RemotionRoot: React.FC = () => {
   return (
@@ -9,11 +18,11 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="MoneyPrinterVideo"
         component={MoneyPrinterVideo}
-        durationInFrames={defaultProps.durationInFrames}
-        fps={defaultProps.fps}
-        width={defaultProps.width}
-        height={defaultProps.height}
-        defaultProps={defaultProps}
+        durationInFrames={studioDefaultProps.durationInFrames}
+        fps={studioDefaultProps.fps}
+        width={studioDefaultProps.width}
+        height={studioDefaultProps.height}
+        defaultProps={studioDefaultProps}
         calculateMetadata={async ({props}: {props: MoneyPrinterProps}) => {
           const durationInFrames = Math.max(
             1,

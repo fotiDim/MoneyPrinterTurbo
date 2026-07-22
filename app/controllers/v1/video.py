@@ -265,6 +265,14 @@ def get_task(
                 _task_file_to_uri(v, endpoint, task_dir, request_id)
                 for v in task["combined_videos"]
             ]
+        if task.get("remotion_projects"):
+            # Standalone Remotion project directories are local filesystem paths for
+            # editing in Studio; expose them as absolute paths, not download URIs.
+            response_task["remotion_projects"] = [
+                os.path.abspath(project_path)
+                for project_path in task["remotion_projects"]
+                if project_path
+            ]
         return utils.get_response(200, response_task)
 
     raise HttpException(

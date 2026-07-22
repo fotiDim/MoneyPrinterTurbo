@@ -17,6 +17,7 @@ logs/
 node_modules
 remotion/out
 remotion/dist
+remotion/public/mpt
 # VuePress 默认临时文件目录
 /sites/docs/.vuepress/.temp
 # VuePress 默认缓存目录

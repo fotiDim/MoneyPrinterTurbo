@@ -63,6 +63,8 @@
         "MoviePy Renderer": "MoviePy (default)",
         "Remotion Renderer": "Remotion",
         "Remotion Not Ready": "Remotion is selected but not ready. Install Node.js 18+ and run cd remotion && npm install.",
+        "Remotion Project Ready": "Editable Remotion project ready",
+        "Remotion Project Help": "Open this folder and run: npx remotion studio",
         "Video Concat Mode": "Modo de concatenación del vídeo",
         "Random": "Concatenación aleatoria (Recomendado)",
         "Sequential": "Concatenación secuencial",

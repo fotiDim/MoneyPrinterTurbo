@@ -1349,6 +1349,17 @@ def _render_generation_task_snapshot(task_id, task):
         return
 
     st.success(tr("Video Generation Completed"))
+    remotion_projects = [
+        path
+        for path in (task.get("remotion_projects") or [])
+        if path and os.path.isdir(path)
+    ]
+    if remotion_projects:
+        st.info(tr("Remotion Project Ready"))
+        for project_path in remotion_projects:
+            st.code(project_path, language=None)
+            st.caption(tr("Remotion Project Help"))
+
     for warning in task.get("warnings") or []:
         if isinstance(warning, Mapping) and warning.get("code") == "sonilo_bgm_failed":
             st.warning(

@@ -248,6 +248,10 @@ By default, videos are composed with MoviePy. To use [Remotion](https://www.remo
 2. `cd remotion && npm install`
 3. Set `video_renderer = "remotion"` in `config.toml`, or choose **Remotion** under Video Settings in the WebUI
 
+Each Remotion output also writes a standalone editable project at
+`storage/tasks/<task_id>/remotion-<index>/` (open with
+`npx remotion studio`).
+
 See [`remotion/README.md`](remotion/README.md). Remotion has a special license for companies: https://www.remotion.dev/docs/license
 
 ### Docker Deployment 🐳

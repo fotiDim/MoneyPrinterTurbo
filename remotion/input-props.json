@@ -1,0 +1,26 @@
+{
+  "clips": [],
+  "width": 1080,
+  "height": 1920,
+  "fps": 30,
+  "durationInFrames": 30,
+  "visualOnly": false,
+  "narrationSrc": "",
+  "voiceVolume": 1,
+  "bgmSrc": "",
+  "bgmVolume": 0.2,
+  "transitionDurationInFrames": 30,
+  "subtitles": {
+    "enabled": false,
+    "cues": [],
+    "fontPath": "",
+    "fontSize": 60,
+    "color": "#FFFFFF",
+    "strokeColor": "#000000",
+    "strokeWidth": 1.5,
+    "position": "bottom",
+    "customPosition": 70,
+    "backgroundColor": null,
+    "roundedBackground": false
+  }
+}

@@ -1,13 +1,20 @@
 # MoneyPrinterTurbo Remotion renderer
 
 Optional full-composition renderer used when `video_renderer = "remotion"` in
-`config.toml`. Python builds a props JSON and runs:
+`config.toml`.
 
-```bash
-npx remotion render src/index.ts MoneyPrinterVideo <output.mp4> --props=<props.json>
+This directory is the **shared template**. Each generated video also gets a
+standalone editable project under:
+
+```text
+storage/tasks/<task_id>/remotion-<index>/
 ```
 
-## Setup
+That project includes composition source, staged media in `public/`, and
+`input-props.json`. MoneyPrinterTurbo renders from that project so Studio edits
+match re-renders.
+
+## Setup (once)
 
 1. Install [Node.js 18+](https://nodejs.org/)
 2. From this directory:
@@ -17,6 +24,22 @@ npm install
 ```
 
 3. Set `video_renderer = "remotion"` in `config.toml`, or choose Remotion in the WebUI.
+
+## Edit a generated video
+
+```bash
+cd storage/tasks/<task_id>/remotion-1
+npx remotion studio
+```
+
+`input-props.json` is imported as Studio default props. Re-render:
+
+```bash
+npx remotion render src/index.ts MoneyPrinterVideo out.mp4 --props=input-props.json --overwrite
+```
+
+`node_modules` inside each task project is a symlink back to this template's
+`node_modules`.
 
 ## License
 

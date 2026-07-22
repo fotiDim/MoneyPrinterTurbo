@@ -1,9 +1,10 @@
 """
 Optional Remotion (https://www.remotion.dev/) full composition renderer.
 
-When ``video_renderer = "remotion"`` in config.toml, MoneyPrinterTurbo composes
-clips, transitions, subtitles, and audio via the bundled ``remotion/`` project
-instead of MoviePy. Upstream LLM / TTS / material download is unchanged.
+When ``video_renderer = "remotion"`` in config.toml, MoneyPrinterTurbo scaffolds
+a standalone Remotion project per output video under
+``storage/tasks/<task_id>/remotion-<index>/``, stages media into that project's
+``public/``, and renders from it so the composition stays editable in Studio.
 
 Setup:
   1. Install Node.js 18+
@@ -16,6 +17,7 @@ https://www.remotion.dev/docs/license
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import random
@@ -88,8 +90,18 @@ class RemotionReadiness:
         )
 
 
-def project_dir() -> str:
+def template_dir() -> str:
+    """Shared Remotion template used to scaffold per-task editable projects."""
     return os.path.join(config.root_dir, "remotion")
+
+
+def project_dir() -> str:
+    """Backward-compatible alias for the shared template directory."""
+    return template_dir()
+
+
+def standalone_project_dir(task_id: str, index: int) -> str:
+    return os.path.join(utils.task_dir(task_id), f"remotion-{index}")
 
 
 def is_requested() -> bool:
@@ -102,7 +114,7 @@ def _node_available() -> bool:
 
 
 def _package_installed() -> bool:
-    return os.path.isdir(os.path.join(project_dir(), "node_modules", "remotion"))
+    return os.path.isdir(os.path.join(template_dir(), "node_modules", "remotion"))
 
 
 def get_readiness() -> RemotionReadiness:
@@ -361,6 +373,200 @@ def write_props_file(props: dict[str, Any], props_path: str) -> str:
     return props_path
 
 
+def _link_or_copy(src: str, dst: str) -> None:
+    """Prefer hardlink, then symlink, then copy so large clips are not duplicated."""
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    if os.path.lexists(dst):
+        os.remove(dst)
+    try:
+        os.link(src, dst)
+        return
+    except OSError:
+        pass
+    try:
+        os.symlink(src, dst)
+        return
+    except OSError:
+        pass
+    shutil.copy2(src, dst)
+
+
+_TEMPLATE_COPY_NAMES = (
+    "package.json",
+    "remotion.config.ts",
+    "tsconfig.json",
+    # Placeholder until staging writes the real timeline; Root.tsx imports this
+    # as Studio defaultProps so preview works without --props.
+    "input-props.json",
+)
+
+
+def _write_standalone_readme(project_path: str) -> None:
+    readme_path = os.path.join(project_path, "README.md")
+    content = """# MoneyPrinterTurbo Remotion project
+
+Standalone Remotion composition for this generated video.
+
+## Preview / edit
+
+```bash
+npx remotion studio
+```
+
+`input-props.json` is loaded as composition default props (clips, audio, subtitles).
+
+## Re-render
+
+```bash
+npx remotion render src/index.ts MoneyPrinterVideo out.mp4 --props=input-props.json --overwrite
+```
+
+`node_modules` is symlinked to the shared repo `remotion/node_modules`.
+If Studio fails to start, run `npm install` in the repository `remotion/` folder first.
+
+Remotion license: https://www.remotion.dev/docs/license
+"""
+    with open(readme_path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def scaffold_project(task_id: str, index: int) -> str:
+    """
+    Create ``storage/tasks/<task_id>/remotion-<index>/`` from the shared template.
+
+    Media is staged later into this project's ``public/``. ``node_modules`` is
+    symlinked to the shared template install so each task does not reinstall.
+    """
+    ensure_ready()
+    template = template_dir()
+    project_path = standalone_project_dir(task_id, index)
+    os.makedirs(project_path, exist_ok=True)
+
+    src_src = os.path.join(template, "src")
+    src_dst = os.path.join(project_path, "src")
+    if os.path.isdir(src_dst):
+        shutil.rmtree(src_dst)
+    shutil.copytree(src_src, src_dst)
+
+    for name in _TEMPLATE_COPY_NAMES:
+        src_file = os.path.join(template, name)
+        if os.path.isfile(src_file):
+            shutil.copy2(src_file, os.path.join(project_path, name))
+
+    public_path = os.path.join(project_path, "public")
+    os.makedirs(public_path, exist_ok=True)
+
+    shared_modules = os.path.join(template, "node_modules")
+    if not os.path.isdir(shared_modules):
+        raise RemotionNotReadyError(
+            "Remotion template node_modules missing. Run `cd remotion && npm install`."
+        )
+    modules_link = os.path.join(project_path, "node_modules")
+    if os.path.lexists(modules_link):
+        if os.path.islink(modules_link) or os.path.isfile(modules_link):
+            os.remove(modules_link)
+        else:
+            shutil.rmtree(modules_link)
+    os.symlink(shared_modules, modules_link)
+
+    # Copy package-lock when present so the standalone folder looks complete.
+    lock_src = os.path.join(template, "package-lock.json")
+    if os.path.isfile(lock_src):
+        shutil.copy2(lock_src, os.path.join(project_path, "package-lock.json"))
+
+    _write_standalone_readme(project_path)
+    logger.info(f"scaffolded Remotion project: {project_path}")
+    return project_path
+
+
+def _stage_one_asset(
+    source_path: str,
+    staging_dir: str,
+    cache: dict[str, str],
+    label: str,
+) -> str:
+    """
+    Stage one filesystem asset into a project's ``public/`` folder.
+
+    Returns a public-relative path (e.g. ``clip-1.mp4``) for ``staticFile()``.
+    """
+    if not source_path:
+        return ""
+    if source_path.startswith(("http://", "https://", "data:")):
+        return source_path
+
+    # Already a staged public-relative basename from an earlier pass in this project.
+    candidate = os.path.join(staging_dir, source_path.replace("\\", "/").lstrip("/"))
+    if not os.path.isabs(source_path) and os.path.isfile(candidate):
+        return source_path.replace("\\", "/")
+
+    abs_source = os.path.abspath(source_path)
+    if abs_source in cache:
+        return cache[abs_source]
+    if not os.path.isfile(abs_source):
+        raise RemotionRenderError(f"Remotion media missing: {abs_source}")
+
+    ext = os.path.splitext(abs_source)[1] or ""
+    safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("._") or "asset"
+    staged_name = f"{safe_label}-{len(cache) + 1}{ext}"
+    staged_abs = os.path.join(staging_dir, staged_name)
+    _link_or_copy(abs_source, staged_abs)
+    cache[abs_source] = staged_name
+    return staged_name
+
+
+def stage_props_into_project(
+    props: dict[str, Any],
+    *,
+    project_path: str,
+) -> dict[str, Any]:
+    """
+    Rewrite absolute media paths into the standalone project's ``public/``.
+
+    Paths become simple public-relative names so Remotion Studio works without
+    repo-specific prefixes.
+    """
+    staged = copy.deepcopy(props)
+    staging_dir = os.path.join(project_path, "public")
+    os.makedirs(staging_dir, exist_ok=True)
+    cache: dict[str, str] = {}
+
+    rewritten_clips = []
+    for clip_index, clip in enumerate(staged.get("clips") or []):
+        clip = dict(clip)
+        clip["src"] = _stage_one_asset(
+            clip.get("src", ""),
+            staging_dir,
+            cache,
+            f"clip-{clip_index}",
+        )
+        rewritten_clips.append(clip)
+    staged["clips"] = rewritten_clips
+
+    staged["narrationSrc"] = _stage_one_asset(
+        staged.get("narrationSrc", ""),
+        staging_dir,
+        cache,
+        "narration",
+    )
+    staged["bgmSrc"] = _stage_one_asset(
+        staged.get("bgmSrc", ""),
+        staging_dir,
+        cache,
+        "bgm",
+    )
+
+    subtitles = dict(staged.get("subtitles") or {})
+    subtitles["fontPath"] = _stage_one_asset(
+        subtitles.get("fontPath", ""),
+        staging_dir,
+        cache,
+        "font",
+    )
+    staged["subtitles"] = subtitles
+    return staged
+
+
 def _remotion_concurrency(threads: Optional[int] = None) -> Optional[int]:
     configured = config.app.get("remotion_concurrency")
     if configured not in (None, ""):
@@ -383,12 +589,21 @@ def render_video(
     output_file: str,
     props: dict[str, Any],
     props_path: str,
+    working_directory: str,
     threads: Optional[int] = None,
 ) -> str:
-    """Run ``npx remotion render`` and return the output path."""
+    """Run ``npx remotion render`` from a Remotion project directory."""
     ensure_ready()
     write_props_file(props, props_path)
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+
+    # Prefer a project-relative props path when the file lives inside cwd so
+    # Studio and CLI share the same input-props.json convention.
+    props_arg = os.path.abspath(props_path)
+    try:
+        props_arg = os.path.relpath(props_path, working_directory)
+    except ValueError:
+        pass
 
     cmd = [
         "npx",
@@ -398,18 +613,18 @@ def render_video(
         ENTRY_FILE,
         COMPOSITION_ID,
         os.path.abspath(output_file),
-        f"--props={os.path.abspath(props_path)}",
+        f"--props={props_arg}",
         "--overwrite",
     ]
     concurrency = _remotion_concurrency(threads)
     if concurrency is not None:
         cmd.append(f"--concurrency={concurrency}")
 
-    logger.info(f"Remotion render: {' '.join(cmd)}")
+    logger.info(f"Remotion render ({working_directory}): {' '.join(cmd)}")
     try:
         completed = subprocess.run(
             cmd,
-            cwd=project_dir(),
+            cwd=working_directory,
             capture_output=True,
             text=True,
             check=False,
@@ -443,14 +658,20 @@ def render_composition(
     visual_only: bool = False,
     bgm_path: str = "",
     clips: Optional[List[dict[str, Any]]] = None,
-) -> tuple[str, List[dict[str, Any]]]:
+    project_path: Optional[str] = None,
+) -> tuple[str, List[dict[str, Any]], str]:
     """
-    Plan (or reuse) timeline clips and render one Remotion output.
+    Scaffold (or reuse) a standalone Remotion project, stage media, and render.
 
-    Returns ``(output_file, clips)`` so callers can reuse the same timeline for
-    a visual-only pass and a final audio pass.
+    Returns ``(output_file, clips, project_path)``. The project is kept on disk
+    for editing in Remotion Studio.
     """
     ensure_ready()
+    if project_path is None:
+        project_path = scaffold_project(task_id, index)
+    elif not os.path.isdir(project_path):
+        project_path = scaffold_project(task_id, index)
+
     if clips is None:
         clips = plan_timeline_clips(
             video_paths=video_paths,
@@ -469,18 +690,31 @@ def render_composition(
         bgm_path=bgm_path,
         visual_only=visual_only,
     )
+    staged_props = stage_props_into_project(props, project_path=project_path)
+
+    # Canonical props for Studio / re-render. Visual-only passes write a sibling
+    # file so the final input-props.json is not overwritten until the final mix.
+    if visual_only:
+        props_path = os.path.join(project_path, "input-props.visual.json")
+    else:
+        props_path = os.path.join(project_path, "input-props.json")
+
+    # Debug copy at task root (optional convenience).
     suffix = "visual" if visual_only else "final"
-    props_path = os.path.join(
+    debug_props_path = os.path.join(
         utils.task_dir(task_id),
         f"remotion-props-{index}-{suffix}.json",
     )
+    write_props_file(staged_props, debug_props_path)
+
     render_video(
         output_file=output_file,
-        props=props,
+        props=staged_props,
         props_path=props_path,
+        working_directory=project_path,
         threads=params.n_threads,
     )
-    return output_file, clips
+    return output_file, clips, project_path
 
 
 def probe_audio_duration(audio_file: str) -> float:

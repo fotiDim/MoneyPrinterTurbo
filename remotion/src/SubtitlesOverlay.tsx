@@ -4,6 +4,7 @@ import {
   continueRender,
   delayRender,
   Sequence,
+  staticFile,
 } from 'remotion';
 import type {SubtitleStyle} from './types';
 
@@ -11,18 +12,19 @@ type SubtitlesOverlayProps = {
   subtitles: SubtitleStyle;
 };
 
-const toFileUrl = (filePath: string) => {
+const toFontUrl = (filePath: string) => {
   if (!filePath) {
     return '';
   }
-  if (filePath.startsWith('file://')) {
+  if (
+    filePath.startsWith('http://') ||
+    filePath.startsWith('https://') ||
+    filePath.startsWith('file://') ||
+    filePath.startsWith('data:')
+  ) {
     return filePath;
   }
-  const normalized = filePath.replace(/\\/g, '/');
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return `file:///${normalized}`;
-  }
-  return `file://${normalized}`;
+  return staticFile(filePath.replace(/^\/+/, ''));
 };
 
 export const SubtitlesOverlay: React.FC<SubtitlesOverlayProps> = ({
@@ -45,7 +47,7 @@ export const SubtitlesOverlay: React.FC<SubtitlesOverlayProps> = ({
           const family = 'MoneyPrinterSubtitleFont';
           const face = new FontFace(
             family,
-            `url(${toFileUrl(subtitles.fontPath)})`,
+            `url(${toFontUrl(subtitles.fontPath)})`,
           );
           await face.load();
           document.fonts.add(face);

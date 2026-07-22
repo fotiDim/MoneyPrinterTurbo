@@ -4,6 +4,7 @@ import {
   Audio,
   OffthreadVideo,
   Sequence,
+  staticFile,
   useVideoConfig,
 } from 'remotion';
 import {SubtitlesOverlay} from './SubtitlesOverlay';
@@ -22,8 +23,9 @@ const toMediaSrc = (filePath: string) => {
   ) {
     return filePath;
   }
-  // Remotion's compositor can read absolute filesystem paths during render.
-  return filePath;
+  // Python stages host files under remotion/public/ and passes public-relative
+  // paths. staticFile() maps them onto Remotion's asset server.
+  return staticFile(filePath.replace(/^\/+/, ''));
 };
 
 export const MoneyPrinterVideo: React.FC<MoneyPrinterProps> = (props) => {
