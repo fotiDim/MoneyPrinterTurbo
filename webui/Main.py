@@ -872,60 +872,6 @@ def _set_stable_widget_value(key, value):
         st.session_state[localized_widget_key(key)] = value
 
 
-def _apply_remotion_seed_to_ui(seed_path: str) -> None:
-    """Prefill transition, subtitle, and BGM widgets from a Remotion seed project."""
-    package = remotion.load_seed_package(seed_path)
-    if package.dominant_transition:
-        _set_stable_widget_value(
-            "video_transition_mode_select", package.dominant_transition
-        )
-    if package.bgm_volume is not None:
-        _set_stable_widget_value("bgm_volume_select", package.bgm_volume)
-    if package.voice_volume is not None:
-        _set_stable_widget_value("voice_volume_select", package.voice_volume)
-    if package.bgm_path and os.path.isfile(package.bgm_path):
-        _set_stable_widget_value("bgm_type_select", "custom")
-        st.session_state["custom_bgm_file_input"] = package.bgm_path
-
-    style = package.subtitle_style
-    if "fontSize" in style:
-        try:
-            st.session_state["font_size_slider"] = min(
-                100, max(30, int(style["fontSize"]))
-            )
-        except (TypeError, ValueError):
-            pass
-    if "color" in style and style["color"]:
-        st.session_state["font_color_picker"] = str(style["color"])
-    if "strokeColor" in style and style["strokeColor"]:
-        st.session_state["stroke_color_picker"] = str(style["strokeColor"])
-    if "strokeWidth" in style:
-        try:
-            st.session_state["stroke_width_slider"] = min(
-                10.0, max(0.0, float(style["strokeWidth"]))
-            )
-        except (TypeError, ValueError):
-            pass
-    if "position" in style and style["position"]:
-        _set_stable_widget_value("subtitle_position_select", str(style["position"]))
-    if "customPosition" in style:
-        try:
-            st.session_state["custom_position_input"] = str(
-                min(100.0, max(0.0, float(style["customPosition"])))
-            )
-        except (TypeError, ValueError):
-            pass
-    if "backgroundColor" in style:
-        bg = style["backgroundColor"]
-        st.session_state["subtitle_background_enabled_checkbox"] = bool(bg)
-        if bg:
-            st.session_state["subtitle_background_color_picker"] = str(bg)
-    if "roundedBackground" in style:
-        st.session_state["rounded_subtitle_background_checkbox"] = bool(
-            style["roundedBackground"]
-        )
-
-
 def _apply_pending_task_restore():
     payload = st.session_state.pop("task_restore_payload", None)
     if not payload:
@@ -2316,40 +2262,6 @@ def _render_video_settings(panel, params):
                 if not readiness.ready:
                     st.warning(tr("Remotion Not Ready"))
                     st.caption(readiness.message)
-
-                seed_projects = remotion.list_seed_projects(limit=30)
-                seed_options = [""] + [project.path for project in seed_projects]
-                seed_labels = {
-                    "": tr("Remotion Seed None"),
-                    **{project.path: project.label for project in seed_projects},
-                }
-                selected_seed = stable_selectbox(
-                    tr("Remotion Seed Project"),
-                    options=seed_options,
-                    default_value="",
-                    key="remotion_seed_select",
-                    format_func=lambda value: seed_labels.get(value, value),
-                    help=tr("Remotion Seed Help"),
-                )
-                custom_seed = st.text_input(
-                    tr("Remotion Seed Path"),
-                    key="remotion_seed_path_input",
-                    help=tr("Remotion Seed Path Help"),
-                ).strip()
-                seed_path = custom_seed or selected_seed or ""
-                params.remotion_seed = seed_path or None
-                applied_key = "remotion_seed_applied_path"
-                if seed_path and st.session_state.get(applied_key) != seed_path:
-                    try:
-                        _apply_remotion_seed_to_ui(seed_path)
-                        st.session_state[applied_key] = seed_path
-                        st.caption(tr("Remotion Seed Applied"))
-                    except remotion.RemotionSeedError as exc:
-                        st.warning(str(exc))
-                elif not seed_path:
-                    st.session_state[applied_key] = ""
-            else:
-                params.remotion_seed = None
 
             saved_video_source_name = config.app.get("video_source", "pexels")
 
@@ -4034,6 +3946,126 @@ def _render_generation_controls(
     return start_button
 
 
+def _render_open_remotion_project():
+    """Separate UI: open an existing Remotion project in place with follow-ups."""
+    with st.container(border=True):
+        st.write(tr("Open Remotion Project"))
+        st.caption(tr("Open Remotion Project Help"))
+
+        readiness = remotion.get_readiness()
+        if not readiness.ready:
+            st.warning(tr("Remotion Not Ready"))
+            st.caption(readiness.message)
+
+        projects = remotion.list_remotion_projects(limit=30)
+        options = [""] + [project.path for project in projects]
+        labels = {
+            "": tr("Open Remotion Project None"),
+            **{project.path: project.label for project in projects},
+        }
+        selected = stable_selectbox(
+            tr("Remotion Project"),
+            options=options,
+            default_value="",
+            key="open_remotion_project_select",
+            format_func=lambda value: labels.get(value, value),
+        )
+        custom_path = st.text_input(
+            tr("Remotion Project Path"),
+            key="open_remotion_project_path",
+            help=tr("Remotion Project Path Help"),
+        ).strip()
+        project_path = custom_path or selected or ""
+
+        context = None
+        if project_path:
+            try:
+                context = remotion.resolve_project_context(project_path)
+                st.code(context.project_path, language=None)
+                subject = (
+                    (context.params or {}).get("video_subject")
+                    or context.task_id
+                )
+                clip_count = len((context.props or {}).get("clips") or [])
+                has_bgm = bool((context.props or {}).get("bgmSrc"))
+                st.caption(
+                    tr("Open Remotion Project Summary").format(
+                        subject=subject,
+                        clips=clip_count,
+                        bgm=tr("Yes") if has_bgm else tr("No"),
+                        script_chars=len(context.script or ""),
+                    )
+                )
+                if context.script:
+                    with st.expander(tr("Current Script"), expanded=False):
+                        st.write(context.script)
+            except remotion.RemotionSeedError as exc:
+                st.warning(str(exc))
+
+        if "remotion_followup_count" not in st.session_state:
+            st.session_state["remotion_followup_count"] = 1
+        followups = []
+        st.write(tr("Follow-up Prompts"))
+        st.caption(tr("Follow-up Prompts Help"))
+        for index in range(int(st.session_state["remotion_followup_count"])):
+            value = st.text_area(
+                tr("Follow-up Prompt N").format(n=index + 1),
+                key=f"remotion_followup_{index}",
+                height=80,
+            )
+            if value and value.strip():
+                followups.append(value.strip())
+        add_col, _ = st.columns([1, 3])
+        if add_col.button(tr("Add Follow-up"), key="add_remotion_followup"):
+            st.session_state["remotion_followup_count"] = (
+                int(st.session_state["remotion_followup_count"]) + 1
+            )
+            st.rerun()
+
+        can_submit = bool(context) and readiness.ready
+        if st.button(
+            tr("Apply Follow-ups And Rerender"),
+            disabled=not can_submit,
+            type="primary",
+            key="submit_remotion_continue",
+        ):
+            params = VideoParams(
+                video_subject=(context.params or {}).get("video_subject")
+                or context.task_id,
+                remotion_project=context.project_path,
+                remotion_followups=followups,
+            )
+            # Carry voice/subtitle defaults from saved params when present.
+            try:
+                saved = VideoParams.model_validate(
+                    {**{"video_subject": params.video_subject}, **(context.params or {})}
+                )
+                params = saved.model_copy(
+                    update={
+                        "remotion_project": context.project_path,
+                        "remotion_followups": followups,
+                    }
+                )
+            except Exception:
+                pass
+
+            task_id = context.task_id
+            _add_active_generation_task(
+                task_id, subject=params.video_subject or task_id
+            )
+            try:
+                st.toast(tr("Applying Remotion Follow-ups"))
+                webui_task.submit_remotion_continue(
+                    task_id=task_id,
+                    params=params,
+                    capture_logs=not config.ui.get("hide_log", False),
+                )
+                st.session_state["current_generation_task_id"] = task_id
+            except Exception:
+                _remove_active_generation_task(task_id)
+                st.error(tr("Video Generation Failed"))
+
+
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
     _render_top_bar()
@@ -4076,6 +4108,8 @@ def _render_application():
         uploaded_bgm_file,
         voice_mode,
     )
+
+    _render_open_remotion_project()
 
     # 生成分支在启动后台线程前已经保存过配置。这里再次保存既没有收益，还可能
     # 与持有 runtime_config_lock 的长任务竞争，使当前 Streamlit 脚本一直阻塞

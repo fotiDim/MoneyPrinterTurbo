@@ -308,11 +308,21 @@
         "llm_provider_tips.minimax": "##### MiniMax 配置说明\n- **API Key**: 在 [中国站](https://platform.minimaxi.com/) 或 [国际站](https://platform.minimax.io/) 创建\n- **Base Url**: 中国站使用 `https://api.minimaxi.com/v1`；国际站使用 `{default_base_url}`（默认）\n- **Model Name**: 默认 `{default_model}`；也可以填写当前账号支持的其它模型 ID\n\n请确保 API Key 与 Base Url 来自同一平台，否则可能出现鉴权失败。",
         "llm_provider_tips.pollinations": "##### Pollinations AI 配置说明\n- **API Key**: 在 [Pollinations]({api_key_url}) 创建\n- **Base Url**: 默认 `{default_base_url}`\n- **Model Name**: 默认 `{default_model}`；也可以填写 [模型目录](https://gen.pollinations.ai/v1/models) 中支持 Chat Completions 的其它模型 ID",
         "llm_provider_tips.litellm": "##### LiteLLM 配置说明\n- **API Key**: 无需在此处填写；请通过环境变量配置目标 Provider 的密钥\n- **Base Url**: 无需填写\n- **Model Name**: 默认 `{default_model}`；使用 `provider/model` 格式，[查看 Provider 列表](https://docs.litellm.ai/docs/providers)",
-        "Remotion Seed Project": "风格种子（历史 Remotion 项目）",
-        "Remotion Seed None": "默认模板（不使用种子）",
-        "Remotion Seed Help": "复用历史 remotion-* 项目的成片效果、转场、字幕样式和 BGM；文案、配音与产品素材仍会重新生成。",
-        "Remotion Seed Path": "或填写种子项目路径",
-        "Remotion Seed Path Help": "可选，填写 remotion-* 目录的绝对/相对路径；填写后优先于下拉选项。",
-        "Remotion Seed Applied": "已将种子的转场、字幕样式和 BGM 填入表单，可继续修改覆盖。"
+        "Open Remotion Project": "**打开 Remotion 项目**",
+        "Open Remotion Project Help": "就地打开已有 remotion-* 完整项目。跟进提示可改文案；是否换素材由提示内容推断，然后在同一目录重新渲染。",
+        "Open Remotion Project None": "选择项目…",
+        "Remotion Project": "Remotion 项目",
+        "Remotion Project Path": "或填写项目路径",
+        "Remotion Project Path Help": "remotion-* 目录的绝对/相对路径；填写后优先于下拉选项。",
+        "Open Remotion Project Summary": "主题：{subject} · 片段：{clips} · BGM：{bgm} · 文案长度：{script_chars}",
+        "Current Script": "当前文案",
+        "Follow-up Prompts": "跟进提示",
+        "Follow-up Prompts Help": "可选。留空则按当前项目（含 Studio 修改）重新渲染。若需换画面/配乐，请在提示中写明。",
+        "Follow-up Prompt N": "跟进提示 {n}",
+        "Add Follow-up": "添加跟进提示",
+        "Apply Follow-ups And Rerender": "应用跟进并重新渲染",
+        "Applying Remotion Follow-ups": "正在应用 Remotion 跟进…",
+        "Yes": "是",
+        "No": "否"
     }
 }

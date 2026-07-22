@@ -1074,43 +1074,18 @@ def render_composition(
     for editing in Remotion Studio.
     """
     ensure_ready()
-    seed_raw = str(getattr(params, "remotion_seed", None) or "").strip()
-    seed_package: Optional[RemotionSeedPackage] = None
-    if seed_raw:
-        if not is_requested():
-            logger.warning(
-                "remotion_seed is set but video_renderer is not remotion; ignoring seed"
-            )
-        else:
-            seed_package = load_seed_package(seed_raw)
-
-    seed_for_scaffold = seed_package.path if seed_package else None
     project_title = str(getattr(params, "video_subject", None) or "").strip() or None
     if project_path is None:
-        project_path = scaffold_project(
-            task_id,
-            index,
-            seed_path=seed_for_scaffold,
-            title=project_title,
-        )
+        project_path = scaffold_project(task_id, index, title=project_title)
     elif not os.path.isdir(project_path):
-        project_path = scaffold_project(
-            task_id,
-            index,
-            seed_path=seed_for_scaffold,
-            title=project_title,
-        )
-
-    effective_transition = resolve_transition_mode_with_seed(
-        video_transition_mode, seed_package
-    )
+        project_path = scaffold_project(task_id, index, title=project_title)
 
     if clips is None:
         clips = plan_timeline_clips(
             video_paths=video_paths,
             audio_duration=audio_duration,
             video_concat_mode=video_concat_mode,
-            video_transition_mode=effective_transition,
+            video_transition_mode=video_transition_mode,
             max_clip_duration=int(params.video_clip_duration or 5),
             clip_speed=float(params.video_clip_speed or 1.0),
         )
@@ -1123,9 +1098,6 @@ def render_composition(
         bgm_path=bgm_path,
         visual_only=visual_only,
     )
-    if seed_package is not None:
-        props = apply_seed_package_to_props(props, seed_package)
-
     staged_props = stage_props_into_project(props, project_path=project_path)
 
     # Canonical props for Studio / re-render. Visual-only passes write a sibling
@@ -1151,6 +1123,169 @@ def render_composition(
         threads=params.n_threads,
     )
     return output_file, clips, project_path
+
+
+def list_remotion_projects(limit: int = 30) -> List[RemotionSeedProject]:
+    """Alias for discovering past remotion-* projects."""
+    return list_seed_projects(limit=limit)
+
+
+def parse_project_index(folder_name: str) -> int:
+    match = re.search(r"-(\d+)$", folder_name or "")
+    if match:
+        try:
+            return max(1, int(match.group(1)))
+        except ValueError:
+            return 1
+    return 1
+
+
+@dataclass(frozen=True)
+class RemotionProjectContext:
+    task_id: str
+    project_path: str
+    index: int
+    script: str
+    params: dict[str, Any]
+    props: dict[str, Any]
+    video_terms: Any
+
+
+def resolve_project_context(project_path: str) -> RemotionProjectContext:
+    """Load an existing remotion-* project and its parent task script.json."""
+    validated = validate_seed_project(project_path)
+    task_id = os.path.basename(os.path.dirname(validated))
+    if not task_id or task_id.startswith("remotion"):
+        raise RemotionSeedError(
+            f"Remotion project is not under storage/tasks/<task_id>/: {validated}"
+        )
+    index = parse_project_index(os.path.basename(validated))
+
+    script = ""
+    params: dict[str, Any] = {}
+    video_terms: Any = ""
+    script_path = os.path.join(utils.task_dir(task_id), "script.json")
+    if os.path.isfile(script_path):
+        try:
+            with open(script_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                script = str(data.get("script") or "")
+                raw_params = data.get("params") or {}
+                if isinstance(raw_params, dict):
+                    params = raw_params
+                video_terms = data.get("search_terms") or ""
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(f"failed to read task script.json: {exc}")
+
+    props: dict[str, Any] = {}
+    props_path = os.path.join(validated, "input-props.json")
+    if os.path.isfile(props_path):
+        try:
+            with open(props_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                props = loaded
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(f"failed to read project input-props.json: {exc}")
+
+    return RemotionProjectContext(
+        task_id=task_id,
+        project_path=validated,
+        index=index,
+        script=script,
+        params=params,
+        props=props,
+        video_terms=video_terms,
+    )
+
+
+def render_existing_project(
+    *,
+    task_id: str,
+    index: int,
+    project_path: str,
+    props: dict[str, Any],
+    output_file: str,
+    threads: Optional[int] = None,
+) -> str:
+    """Re-render an existing Remotion project without scaffolding."""
+    ensure_ready()
+    if not os.path.isdir(project_path):
+        raise RemotionRenderError(f"Remotion project missing: {project_path}")
+    staged_props = stage_props_into_project(props, project_path=project_path)
+    props_path = os.path.join(project_path, "input-props.json")
+    debug_props_path = os.path.join(
+        utils.task_dir(task_id),
+        f"remotion-props-{index}-final.json",
+    )
+    write_props_file(staged_props, debug_props_path)
+    return render_video(
+        output_file=output_file,
+        props=staged_props,
+        props_path=props_path,
+        working_directory=project_path,
+        threads=threads,
+    )
+
+
+def props_with_updated_audio(
+    props: dict[str, Any],
+    *,
+    audio_path: str,
+    subtitle_path: str,
+    params: VideoParams,
+    clips: Optional[List[dict[str, Any]]] = None,
+    bgm_path: str = "",
+    audio_duration: Optional[float] = None,
+) -> dict[str, Any]:
+    """Update narration/subtitles/BGM on existing props; optionally replace clips."""
+    updated = copy.deepcopy(props)
+    if clips is not None:
+        updated["clips"] = copy.deepcopy(clips)
+    updated["narrationSrc"] = os.path.abspath(audio_path) if audio_path else ""
+    updated["voiceVolume"] = float(params.voice_volume or 1.0)
+    if bgm_path:
+        updated["bgmSrc"] = os.path.abspath(bgm_path)
+        updated["bgmVolume"] = float(params.bgm_volume or 0.0)
+    elif bgm_path == "" and params.bgm_type == "none":
+        updated["bgmSrc"] = ""
+        updated["bgmVolume"] = 0.0
+
+    subtitle_cues = []
+    font_path = ""
+    if params.subtitle_enabled:
+        subtitle_cues = parse_srt_cues(subtitle_path)
+        font_name = params.font_name or "STHeitiMedium.ttc"
+        font_path = os.path.abspath(os.path.join(utils.font_dir(), font_name))
+        if not os.path.isfile(font_path):
+            # Keep prior staged font relative path if present.
+            prior = (updated.get("subtitles") or {}).get("fontPath") or ""
+            font_path = prior if prior else ""
+
+    updated["subtitles"] = {
+        "enabled": bool(params.subtitle_enabled and subtitle_cues),
+        "cues": subtitle_cues,
+        "fontPath": font_path or (updated.get("subtitles") or {}).get("fontPath", ""),
+        "fontSize": int(params.font_size or 60),
+        "color": params.text_fore_color or "#FFFFFF",
+        "strokeColor": params.stroke_color or "#000000",
+        "strokeWidth": float(params.stroke_width or 1.5),
+        "position": params.subtitle_position or "bottom",
+        "customPosition": float(params.custom_position or 70.0),
+        "backgroundColor": _resolve_subtitle_background(params),
+        "roundedBackground": bool(params.rounded_subtitle_background),
+    }
+
+    clip_list = updated.get("clips") or []
+    if clip_list:
+        updated["durationInFrames"] = max(
+            1, sum(int(clip.get("durationInFrames") or 0) for clip in clip_list)
+        )
+    elif audio_duration is not None:
+        updated["durationInFrames"] = _seconds_to_frames(float(audio_duration))
+    updated["visualOnly"] = False
+    return updated
 
 
 def probe_audio_duration(audio_file: str) -> float:

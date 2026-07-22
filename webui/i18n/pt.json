@@ -281,11 +281,21 @@
         "Video Encoder": "Codificador de vídeo",
         "Default Video Encoder": "Padrão (recomendado)",
         "Video Encoder Help": "Opção avançada. Padrão segue a política estável do aplicativo, atualmente libx264. Se um codificador de hardware não estiver disponível, o aplicativo retorna automaticamente para libx264.",
-        "Remotion Seed Project": "Style Seed (past Remotion project)",
-        "Remotion Seed None": "Default template (no seed)",
-        "Remotion Seed Help": "Reuse composition effects, transitions, subtitle look, and BGM from a past remotion-* project. New script, voiceover, and product clips are still generated.",
-        "Remotion Seed Path": "Or seed project path",
-        "Remotion Seed Path Help": "Optional absolute/relative path to a remotion-* folder. Overrides the dropdown when set.",
-        "Remotion Seed Applied": "Seed style applied to transition, subtitles, and BGM. Edit any field to override."
+        "Open Remotion Project": "**Open Remotion Project**",
+        "Open Remotion Project Help": "Load a full existing remotion-* project in place. Follow-ups can revise the script; whether materials change is inferred from the prompts. Then re-render the same folder.",
+        "Open Remotion Project None": "Select a project…",
+        "Remotion Project": "Remotion project",
+        "Remotion Project Path": "Or project path",
+        "Remotion Project Path Help": "Absolute/relative path to a remotion-* folder. Overrides the dropdown when set.",
+        "Open Remotion Project Summary": "Subject: {subject} · Clips: {clips} · BGM: {bgm} · Script length: {script_chars}",
+        "Current Script": "Current script",
+        "Follow-up Prompts": "Follow-up prompts",
+        "Follow-up Prompts Help": "Optional. Empty = re-render current project (including Studio edits). Mention new visuals/music in a prompt if those should change.",
+        "Follow-up Prompt N": "Follow-up {n}",
+        "Add Follow-up": "Add follow-up",
+        "Apply Follow-ups And Rerender": "Apply follow-ups & re-render",
+        "Applying Remotion Follow-ups": "Applying Remotion follow-ups…",
+        "Yes": "Yes",
+        "No": "No"
     }
 }

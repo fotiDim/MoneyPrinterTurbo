@@ -250,9 +250,8 @@ By default, videos are composed with MoviePy. To use [Remotion](https://www.remo
 
 Each Remotion output also writes a standalone editable project at
 `storage/tasks/<task_id>/remotion-<title-slug>-<task8>-<index>/` (open with
-`npx remotion studio`). To reuse that look for a new product video, pick it as a
-**style seed** in the WebUI or pass `--remotion-seed <path>` on the CLI (reuses
-composition, transitions, subtitle style, and BGM; regenerates script/voice/clips).
+`npx remotion studio`). Use the WebUI **Open Remotion Project** panel (or
+`--remotion-project` / `--remotion-followup`) to continue that project in place.
 
 See [`remotion/README.md`](remotion/README.md). Remotion has a special license for companies: https://www.remotion.dev/docs/license
 

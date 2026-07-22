@@ -282,12 +282,22 @@ Output and exit status:
         help="FFmpeg worker thread count, at least 1 (default: 2)",
     )
     video_group.add_argument(
-        "--remotion-seed",
+        "--remotion-project",
         default=None,
         metavar="PATH",
         help=(
-            "reuse composition src, transitions, subtitle look, and BGM from an "
-            "existing storage/tasks/.../remotion-* project (Remotion renderer only)"
+            "continue an existing storage/tasks/.../remotion-* project in place "
+            "(re-render; optional follow-ups revise script / materials)"
+        ),
+    )
+    video_group.add_argument(
+        "--remotion-followup",
+        action="append",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "follow-up instruction when using --remotion-project; may be repeated. "
+            "Whether materials regenerate is inferred from these prompts"
         ),
     )
 
@@ -457,8 +467,14 @@ Output and exit status:
     )
     args = parser.parse_args(argv)
 
-    if not args.video_subject.strip() and not args.video_script.strip():
-        parser.error("one of --video-subject or --video-script is required")
+    if (
+        not args.video_subject.strip()
+        and not args.video_script.strip()
+        and not (getattr(args, "remotion_project", None) or "").strip()
+    ):
+        parser.error(
+            "one of --video-subject, --video-script, or --remotion-project is required"
+        )
 
     if args.video_source == "local" and args.stop_at == "terms":
         parser.error(
@@ -564,12 +580,18 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "stroke_color",
         "stroke_width",
         "rounded_subtitle_background",
-        "remotion_seed",
+        "remotion_project",
     ]
     for name in optional_arg_names:
         value = getattr(args, name)
         if value is not None:
             params_kwargs[name] = value
+
+    followups = getattr(args, "remotion_followup", None)
+    if followups:
+        params_kwargs["remotion_followups"] = [
+            str(item).strip() for item in followups if str(item).strip()
+        ]
 
     if args.subtitle_background_enabled is False:
         params_kwargs["text_background_color"] = False
@@ -579,12 +601,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
     elif args.subtitle_background_enabled is True:
         params_kwargs["text_background_color"] = True
 
-    params = VideoParams(**params_kwargs)
-    if params.remotion_seed:
-        from app.services import remotion as remotion_service
-
-        params = remotion_service.merge_seed_defaults_into_params(params)
-    return params
+    return VideoParams(**params_kwargs)
 
 
 def _resolve_cli_file(
@@ -775,7 +792,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         params = build_video_params(args)
-        prepare_cli_files(params, stop_at=args.stop_at)
+        if not params.remotion_project:
+            prepare_cli_files(params, stop_at=args.stop_at)
     except (ValueError, OSError) as exc:
         logger.error(f"invalid CLI input: {exc}")
         return 2
@@ -786,14 +804,27 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     from app.utils import utils
 
     task_id = args.task_id or utils.get_uuid()
-    logger.info(f"start CLI task: task_id={task_id}, stop_at={args.stop_at}")
-    try:
-        result = tm.start(task_id=task_id, params=params, stop_at=args.stop_at)
-    except Exception as exc:
-        logger.exception(
-            f"CLI task failed with an unexpected error: task_id={task_id}, error={exc}"
+    if params.remotion_project:
+        logger.info(
+            f"start CLI remotion continue: project={params.remotion_project}"
         )
-        return 1
+        try:
+            result = tm.continue_remotion_project(params=params)
+            task_id = result.get("task_id") or task_id
+        except Exception as exc:
+            logger.exception(
+                f"CLI remotion continue failed with an unexpected error: error={exc}"
+            )
+            return 1
+    else:
+        logger.info(f"start CLI task: task_id={task_id}, stop_at={args.stop_at}")
+        try:
+            result = tm.start(task_id=task_id, params=params, stop_at=args.stop_at)
+        except Exception as exc:
+            logger.exception(
+                f"CLI task failed with an unexpected error: task_id={task_id}, error={exc}"
+            )
+            return 1
     if not result or result.get("state") == tm.const.TASK_STATE_FAILED:
         failed_stage = result.get("failed_stage", "unknown") if result else "unknown"
         error = result.get("error", "unknown task error") if result else "empty result"

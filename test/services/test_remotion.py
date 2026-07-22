@@ -295,36 +295,133 @@ class RemotionServiceTests(unittest.TestCase):
             self.assertEqual(updated["narrationSrc"], "/new-voice.mp3")
             self.assertEqual(updated["clips"][0]["src"], "/new.mp4")
 
-    def test_merge_seed_defaults_sets_transition_and_custom_bgm(self):
+    def test_resolve_project_context_loads_script_and_props(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            seed = Path(tmp_dir) / "remotion-1"
-            (seed / "src").mkdir(parents=True)
-            (seed / "public").mkdir(parents=True)
-            bgm = seed / "public" / "bed.mp3"
-            bgm.write_bytes(b"x")
-            (seed / "input-props.json").write_text(
+            tasks = Path(tmp_dir) / "tasks"
+            task_id = "task-continue"
+            project = tasks / task_id / "remotion-demo-abcd1234-1"
+            (project / "src").mkdir(parents=True)
+            (project / "public").mkdir(parents=True)
+            props = {
+                "clips": [{"src": "clip-0-1.mp4", "durationInFrames": 30}],
+                "bgmSrc": "bgm-1.mp3",
+                "narrationSrc": "narration-1.mp3",
+            }
+            (project / "input-props.json").write_text(
+                json.dumps(props), encoding="utf-8"
+            )
+            script_path = tasks / task_id / "script.json"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text(
                 json.dumps(
                     {
-                        "clips": [{"transition": "ZoomIn"}],
-                        "bgmSrc": "bed.mp3",
-                        "bgmVolume": 0.4,
-                        "subtitles": {"fontSize": 80, "color": "#00FF00"},
+                        "script": "Hello world",
+                        "search_terms": ["ai"],
+                        "params": {"video_subject": "Demo", "video_aspect": "9:16"},
                     }
                 ),
                 encoding="utf-8",
             )
-            params = VideoParams(
-                video_subject="demo",
-                remotion_seed=str(seed),
-                bgm_type="random",
-                video_transition_mode=VideoTransitionMode.none,
+            with patch.object(
+                remotion.utils,
+                "task_dir",
+                side_effect=lambda tid="": str(tasks / (tid or "")),
+            ):
+                context = remotion.resolve_project_context(str(project))
+            self.assertEqual(context.task_id, task_id)
+            self.assertEqual(context.index, 1)
+            self.assertEqual(context.script, "Hello world")
+            self.assertEqual(context.params.get("video_subject"), "Demo")
+            self.assertEqual(len(context.props.get("clips") or []), 1)
+
+    def test_followup_plan_heuristic_detects_materials(self):
+        from app.services import llm as llm_service
+
+        with patch.object(
+            llm_service,
+            "_generate_response",
+            side_effect=RuntimeError("offline"),
+        ):
+            plan = llm_service.infer_remotion_followup_plan(
+                "script",
+                ["Make it punchier", "Use more product close-up footage"],
             )
-            merged = remotion.merge_seed_defaults_into_params(params)
-            self.assertEqual(merged.video_transition_mode, VideoTransitionMode.zoom_in)
-            self.assertEqual(merged.bgm_type, "custom")
-            self.assertTrue(os.path.samefile(merged.bgm_file, bgm))
-            self.assertEqual(merged.font_size, 80)
-            self.assertEqual(merged.text_fore_color, "#00FF00")
+        self.assertTrue(plan.revise_script)
+        self.assertTrue(plan.regenerate_tts)
+        self.assertTrue(plan.regenerate_materials)
+
+    def test_continue_remotion_project_rerenders_without_scaffold(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tasks = Path(tmp_dir) / "tasks"
+            task_id = "task-rerender"
+            project = tasks / task_id / "remotion-demo-abcd1234-1"
+            (project / "src").mkdir(parents=True)
+            (project / "public").mkdir(parents=True)
+            props = {
+                "clips": [
+                    {
+                        "src": "clip-0-1.mp4",
+                        "startFromSeconds": 0,
+                        "durationInFrames": 30,
+                        "speed": 1.0,
+                        "transition": "FadeIn",
+                        "slideSide": "left",
+                    }
+                ],
+                "narrationSrc": "narration-1.mp3",
+                "bgmSrc": "",
+                "subtitles": {"enabled": False, "cues": [], "fontPath": ""},
+                "durationInFrames": 30,
+            }
+            (project / "input-props.json").write_text(
+                json.dumps(props), encoding="utf-8"
+            )
+            (project / "public" / "clip-0-1.mp4").write_bytes(b"vid")
+            (project / "public" / "narration-1.mp3").write_bytes(b"aud")
+            (tasks / task_id / "script.json").write_text(
+                json.dumps(
+                    {
+                        "script": "Keep me",
+                        "search_terms": "",
+                        "params": {"video_subject": "Demo"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_render(**kwargs):
+                Path(kwargs["output_file"]).parent.mkdir(parents=True, exist_ok=True)
+                Path(kwargs["output_file"]).write_bytes(b"out")
+                return kwargs["output_file"]
+
+            with (
+                patch.object(tm.remotion, "ensure_ready"),
+                patch.object(
+                    tm.remotion,
+                    "render_existing_project",
+                    side_effect=fake_render,
+                ) as render_existing,
+                patch.object(tm.remotion, "scaffold_project") as scaffold,
+                patch.object(
+                    tm.utils,
+                    "task_dir",
+                    side_effect=lambda tid="": str(tasks / (tid or task_id)),
+                ),
+                patch.object(tm.sm.state, "update_task"),
+                patch.object(tm.sm.state, "get_task", return_value={}),
+            ):
+                result = tm.continue_remotion_project(
+                    params=VideoParams(
+                        video_subject="Demo",
+                        remotion_project=str(project),
+                        remotion_followups=[],
+                    )
+                )
+
+            scaffold.assert_not_called()
+            render_existing.assert_called_once()
+            self.assertEqual(result.get("state"), tm.const.TASK_STATE_COMPLETE)
+            self.assertTrue(str(result["videos"][0]).endswith("final-1.mp4"))
 
     def test_stage_props_into_project_uses_simple_public_names(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

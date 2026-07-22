@@ -116,6 +116,91 @@ def _run_generation(
                 )
 
 
+def submit_remotion_continue(
+    task_id: str,
+    params: VideoParams,
+    capture_logs: bool = True,
+) -> None:
+    """Queue an in-place Remotion continue job for an existing project/task."""
+    task_params = params.model_copy(deep=True)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=0,
+        video_subject=task_params.video_subject or task_params.video_script or task_id,
+    )
+    try:
+        _task_manager.add_task(
+            _run_remotion_continue,
+            task_id=task_id,
+            params=task_params,
+            capture_logs=capture_logs,
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        sm.state.update_task(
+            task_id,
+            state=const.TASK_STATE_FAILED,
+            progress=0,
+            failed_stage="scheduling",
+            error=error,
+        )
+        logger.exception(
+            f"failed to submit Remotion continue task, task_id={task_id}, error={exc}"
+        )
+        raise
+
+
+def _run_remotion_continue(
+    task_id: str,
+    params: VideoParams,
+    capture_logs: bool,
+) -> dict:
+    log_handler_id = None
+    worker_thread_id = threading.get_ident()
+    try:
+        if capture_logs:
+            log_handler_id = logger.add(
+                lambda message: _append_task_log(task_id, str(message)),
+                level="DEBUG",
+                format=format_log_record,
+                colorize=False,
+                filter=lambda record: record["thread"].id == worker_thread_id,
+            )
+        with config.runtime_config_lock():
+            return tm.continue_remotion_project(task_id=task_id, params=params)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        failure = {
+            "task_id": task_id,
+            "state": const.TASK_STATE_FAILED,
+            "progress": 0,
+            "failed_stage": "webui_worker",
+            "error": error,
+        }
+        sm.state.update_task(
+            task_id,
+            state=failure["state"],
+            progress=failure["progress"],
+            failed_stage=failure["failed_stage"],
+            error=failure["error"],
+        )
+        logger.exception(
+            f"unexpected WebUI remotion continue worker failure, "
+            f"task_id={task_id}, error={exc}"
+        )
+        return failure
+    finally:
+        if log_handler_id is not None:
+            try:
+                logger.remove(log_handler_id)
+            except ValueError:
+                logger.debug(
+                    f"WebUI remotion continue log handler already removed: "
+                    f"task_id={task_id}"
+                )
+
+
 def submit_generation(
     task_id: str,
     params: VideoParams,

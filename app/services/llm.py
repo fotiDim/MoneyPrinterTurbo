@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from dataclasses import dataclass
 from time import perf_counter
 from typing import List
 
@@ -946,6 +947,150 @@ def generate_social_metadata(
 
     logger.warning("falling back to heuristic social metadata")
     return _fallback_social_metadata(video_subject, video_script, platform)
+
+
+@dataclass(frozen=True)
+class RemotionFollowupPlan:
+    revise_script: bool
+    regenerate_tts: bool
+    regenerate_materials: bool
+    regenerate_bgm: bool
+
+
+def _default_followup_plan(followups: list[str]) -> RemotionFollowupPlan:
+    has_followups = bool(followups)
+    joined = " ".join(followups).lower()
+    materials_hints = (
+        "footage",
+        "clip",
+        "visual",
+        "material",
+        "b-roll",
+        "broll",
+        "stock",
+        "product shot",
+        "scene",
+        "素材",
+        "画面",
+        "镜头",
+        "重新配图",
+        "换素材",
+    )
+    bgm_hints = ("bgm", "music", "soundtrack", "配乐", "背景音乐", "换音乐")
+    regenerate_materials = has_followups and any(h in joined for h in materials_hints)
+    regenerate_bgm = has_followups and any(h in joined for h in bgm_hints)
+    return RemotionFollowupPlan(
+        revise_script=has_followups,
+        regenerate_tts=has_followups,
+        regenerate_materials=regenerate_materials,
+        regenerate_bgm=regenerate_bgm,
+    )
+
+
+def infer_remotion_followup_plan(
+    script: str,
+    followups: list[str],
+) -> RemotionFollowupPlan:
+    """
+    Decide which Remotion continue steps to run from follow-up prompts.
+
+    Uses an LLM JSON response when possible; falls back to keyword heuristics.
+    """
+    cleaned = [str(item).strip() for item in (followups or []) if str(item).strip()]
+    if not cleaned:
+        return RemotionFollowupPlan(
+            revise_script=False,
+            regenerate_tts=False,
+            regenerate_materials=False,
+            regenerate_bgm=False,
+        )
+
+    prompt = f"""You analyze follow-up edit requests for an existing short video.
+Return ONLY a JSON object with boolean fields:
+{{
+  "revise_script": true/false,
+  "regenerate_tts": true/false,
+  "regenerate_materials": true/false,
+  "regenerate_bgm": true/false
+}}
+
+Rules:
+- revise_script: true if wording, tone, length, claims, or narration should change
+- regenerate_tts: true if voiceover must be regenerated (usually same as revise_script)
+- regenerate_materials: true ONLY if the user asks for new/different visuals, clips, footage, product shots, or scenes
+- regenerate_bgm: true ONLY if the user asks for new/different background music
+
+Current script:
+{script[:4000]}
+
+Follow-up prompts:
+{chr(10).join(f"- {item}" for item in cleaned)}
+"""
+    try:
+        response = _generate_response(prompt=prompt)
+        if not response or "Error: " in str(response):
+            return _default_followup_plan(cleaned)
+        match = re.search(r"\{[\s\S]*\}", str(response))
+        if not match:
+            return _default_followup_plan(cleaned)
+        data = json.loads(match.group(0))
+        return RemotionFollowupPlan(
+            revise_script=bool(data.get("revise_script", True)),
+            regenerate_tts=bool(data.get("regenerate_tts", data.get("revise_script", True))),
+            regenerate_materials=bool(data.get("regenerate_materials", False)),
+            regenerate_bgm=bool(data.get("regenerate_bgm", False)),
+        )
+    except Exception as exc:
+        logger.warning(f"failed to infer remotion follow-up plan via LLM: {exc}")
+        return _default_followup_plan(cleaned)
+
+
+def revise_script_with_followups(
+    *,
+    script: str,
+    subject: str,
+    followups: list[str],
+    language: str = "",
+) -> str:
+    """Rewrite an existing script according to follow-up instructions."""
+    cleaned = [str(item).strip() for item in (followups or []) if str(item).strip()]
+    if not cleaned:
+        return script
+
+    prompt = f"""Rewrite the video narration script below according to the follow-up instructions.
+Keep it suitable for spoken voiceover. Do not use markdown.
+Return only the revised script text.
+
+Subject: {subject or "(unchanged)"}
+Language: {language or "same as original"}
+
+Original script:
+{script}
+
+Follow-up instructions:
+{chr(10).join(f"- {item}" for item in cleaned)}
+"""
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt=prompt)
+            if response and "Error: " not in str(response):
+                revised = (
+                    str(response)
+                    .replace("*", "")
+                    .replace("#", "")
+                    .strip()
+                )
+                revised = re.sub(r"\[.*\]", "", revised)
+                if revised:
+                    return revised
+        except Exception as exc:
+            logger.warning(f"revise_script_with_followups failed: {exc}")
+        if i < _max_retries - 1:
+            logger.warning(
+                f"failed to revise script with follow-ups, trying again... {i + 1}"
+            )
+    logger.warning("falling back to original script after follow-up rewrite failures")
+    return script
 
 
 if __name__ == "__main__":

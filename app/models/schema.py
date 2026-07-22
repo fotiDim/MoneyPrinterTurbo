@@ -117,8 +117,9 @@ class VideoParams(BaseModel):
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
-    # Optional path to a past remotion-* project used as style/composition seed.
-    remotion_seed: Optional[str] = None
+    # Open an existing remotion-* project in place (continue / follow-ups).
+    remotion_project: Optional[str] = None
+    remotion_followups: Optional[List[str]] = None
 
 
 class SubtitleRequest(BaseModel):

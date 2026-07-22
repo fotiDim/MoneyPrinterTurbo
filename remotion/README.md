@@ -25,14 +25,23 @@ npm install
 
 3. Set `video_renderer = "remotion"` in `config.toml`, or choose Remotion in the WebUI.
 
-## Style seed (reuse look for new videos)
+## Open an existing project (in place)
 
-Pick a past `storage/tasks/<id>/remotion-*` project as a **style seed** so a new
-product-showcase video reuses composition `src/`, transitions, subtitle look,
-and BGM. Script, voiceover, and product clips are still generated fresh.
+WebUI: **Open Remotion Project** panel — pick a past `remotion-*` folder, add
+optional follow-up prompts, then **Apply follow-ups & re-render**. The same
+project folder is updated (no fork). Whether materials/BGM change is inferred
+from the prompts.
 
-- WebUI: Remotion renderer → **Style Seed** dropdown / path
-- CLI: `--remotion-seed storage/tasks/<id>/remotion-<slug>-<task8>-1`
+CLI:
+
+```bash
+uv run python cli.py \
+  --remotion-project storage/tasks/<id>/remotion-<slug>-<task8>-1 \
+  --remotion-followup "Make the tone more urgent" \
+  --remotion-followup "Use more product close-up footage"
+```
+
+Empty follow-ups re-render the current project (including Studio edits) as-is.
 
 ## Edit a generated video
 

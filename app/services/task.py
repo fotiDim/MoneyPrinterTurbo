@@ -1,3 +1,4 @@
+import copy
 import math
 import os
 import re
@@ -663,18 +664,6 @@ def _resolve_remotion_bgm_path(
         return ""
     if bgm_file_override is not None:
         return bgm_file_override or ""
-
-    bgm_type = str(params.bgm_type or "").strip().lower()
-    custom_file = str(params.bgm_file or "").strip()
-    if bgm_type == "custom" and custom_file:
-        return video.get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file) or ""
-
-    seed = str(getattr(params, "remotion_seed", None) or "").strip()
-    if seed:
-        seed_bgm = remotion.resolve_seed_bgm_file(seed)
-        if seed_bgm:
-            return seed_bgm
-
     return video.get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file) or ""
 
 
@@ -692,15 +681,11 @@ def _generate_final_videos_with_remotion(
 ):
     """Remotion 全量合成：脚手架独立项目，先画面轨，再按需配乐，最后成片。"""
     remotion.ensure_ready()
-    if str(getattr(params, "remotion_seed", None) or "").strip():
-        params = remotion.merge_seed_defaults_into_params(params)
-
     final_video_paths = []
     combined_video_paths = []
     remotion_project_paths = []
     warnings = []
     progress = 50
-    seed_path = str(getattr(params, "remotion_seed", None) or "").strip() or None
     project_title = str(getattr(params, "video_subject", None) or "").strip() or None
 
     for i in range(params.video_count):
@@ -708,7 +693,6 @@ def _generate_final_videos_with_remotion(
         project_path = remotion.scaffold_project(
             task_id,
             index,
-            seed_path=seed_path,
             title=project_title,
         )
         combined_video_path = path.join(
@@ -818,10 +802,6 @@ def generate_final_videos(
         video_music_provider is not None
         and bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
     )
-    if str(getattr(params, "remotion_seed", None) or "").strip() and not remotion.is_requested():
-        logger.warning(
-            "remotion_seed is set but video_renderer is not remotion; ignoring seed"
-        )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
     # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
     if params.match_materials_to_script:
@@ -1482,6 +1462,289 @@ def _run_pipeline(
             kwargs["cross_post_owner"] = None
 
     return kwargs
+
+
+def _params_from_context(context: remotion.RemotionProjectContext, overrides: VideoParams | None = None) -> VideoParams:
+    """Merge saved task params with optional WebUI/CLI overrides for continue."""
+    base = dict(context.params or {})
+    base.setdefault("video_subject", "Remotion continue")
+    try:
+        params = VideoParams.model_validate(base)
+    except Exception:
+        params = VideoParams(video_subject=str(base.get("video_subject") or "Remotion continue"))
+    if overrides is None:
+        return params
+    # Prefer explicit continue fields and common voice/subtitle overrides from the request.
+    if overrides.remotion_project:
+        params.remotion_project = overrides.remotion_project
+    if overrides.remotion_followups is not None:
+        params.remotion_followups = overrides.remotion_followups
+    if overrides.voice_name:
+        params.voice_name = overrides.voice_name
+    if overrides.voice_rate is not None:
+        params.voice_rate = overrides.voice_rate
+    if overrides.voice_volume is not None:
+        params.voice_volume = overrides.voice_volume
+    if overrides.subtitle_enabled is not None:
+        params.subtitle_enabled = overrides.subtitle_enabled
+    if overrides.font_size:
+        params.font_size = overrides.font_size
+    if overrides.text_fore_color:
+        params.text_fore_color = overrides.text_fore_color
+    if overrides.stroke_color:
+        params.stroke_color = overrides.stroke_color
+    if overrides.stroke_width is not None:
+        params.stroke_width = overrides.stroke_width
+    if overrides.subtitle_position:
+        params.subtitle_position = overrides.subtitle_position
+    if overrides.bgm_type:
+        params.bgm_type = overrides.bgm_type
+    if overrides.bgm_file:
+        params.bgm_file = overrides.bgm_file
+    if overrides.bgm_volume is not None:
+        params.bgm_volume = overrides.bgm_volume
+    if overrides.video_source:
+        params.video_source = overrides.video_source
+    if overrides.video_materials:
+        params.video_materials = overrides.video_materials
+    if overrides.n_threads is not None:
+        params.n_threads = overrides.n_threads
+    return params
+
+
+def continue_remotion_project(
+    task_id: str | None = None,
+    params: VideoParams | None = None,
+    *,
+    project_path: str | None = None,
+    followups: list[str] | None = None,
+) -> dict:
+    """
+    Continue an existing Remotion project in place.
+
+    Applies follow-up prompts (script/TTS/materials/BGM inferred), then re-renders
+    into the same project folder and ``final-{index}.mp4``.
+    """
+    remotion.ensure_ready()
+    path_arg = (
+        project_path
+        or (str(params.remotion_project).strip() if params and params.remotion_project else "")
+    )
+    if not path_arg:
+        raise ValueError("remotion project path is required")
+
+    context = remotion.resolve_project_context(path_arg)
+    resolved_task_id = task_id or context.task_id
+    if resolved_task_id != context.task_id:
+        logger.warning(
+            f"continue task_id mismatch; using project task_id={context.task_id} "
+            f"(requested={resolved_task_id})"
+        )
+        resolved_task_id = context.task_id
+
+    followup_list = followups
+    if followup_list is None and params is not None:
+        followup_list = list(params.remotion_followups or [])
+    followup_list = [str(item).strip() for item in (followup_list or []) if str(item).strip()]
+
+    sm.state.update_task(
+        resolved_task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=5,
+        video_subject=(
+            (params.video_subject if params else None)
+            or context.params.get("video_subject")
+            or resolved_task_id
+        ),
+    )
+
+    try:
+        working_params = _params_from_context(context, params)
+        script = context.script or working_params.video_script or working_params.video_subject
+        plan = llm.infer_remotion_followup_plan(script, followup_list)
+        logger.info(
+            f"remotion continue plan: revise_script={plan.revise_script}, "
+            f"tts={plan.regenerate_tts}, materials={plan.regenerate_materials}, "
+            f"bgm={plan.regenerate_bgm}, followups={len(followup_list)}"
+        )
+        sm.state.update_task(resolved_task_id, progress=15)
+
+        # Empty follow-ups: re-render the project on disk as-is (Studio edits included).
+        if not followup_list and context.props:
+            final_video_path = path.join(
+                utils.task_dir(resolved_task_id), f"final-{context.index}.mp4"
+            )
+            sm.state.update_task(resolved_task_id, progress=70)
+            remotion.render_existing_project(
+                task_id=resolved_task_id,
+                index=context.index,
+                project_path=context.project_path,
+                props=context.props,
+                output_file=final_video_path,
+                threads=working_params.n_threads,
+            )
+            result = {
+                "task_id": resolved_task_id,
+                "state": const.TASK_STATE_COMPLETE,
+                "progress": 100,
+                "videos": [final_video_path],
+                "combined_videos": [],
+                "remotion_projects": [context.project_path],
+                "script": script,
+                "terms": context.video_terms,
+                "warnings": None,
+            }
+            sm.state.update_task(resolved_task_id, **result)
+            logger.success(
+                f"remotion continue re-rendered in place: task_id={resolved_task_id}"
+            )
+            return result
+
+        if plan.revise_script and followup_list:
+            script = llm.revise_script_with_followups(
+                script=script,
+                subject=working_params.video_subject or "",
+                followups=followup_list,
+                language=working_params.video_language or "",
+            )
+
+        video_terms = context.video_terms
+        if plan.regenerate_materials:
+            terms = llm.generate_terms(
+                video_subject=working_params.video_subject or "",
+                video_script=script,
+                amount=8 if working_params.match_materials_to_script else 5,
+                match_script_order=bool(working_params.match_materials_to_script),
+            )
+            if isinstance(terms, str) and "Error: " in terms:
+                raise RuntimeError(terms)
+            video_terms = terms
+
+        save_script_data(resolved_task_id, script, video_terms, working_params)
+        sm.state.update_task(resolved_task_id, progress=30)
+
+        audio_file = path.join(utils.task_dir(resolved_task_id), "audio.mp3")
+        subtitle_path = path.join(utils.task_dir(resolved_task_id), "subtitle.srt")
+        audio_duration = None
+        sub_maker = None
+
+        if plan.regenerate_tts or not os.path.isfile(audio_file):
+            audio_file, audio_duration, sub_maker = generate_audio(
+                resolved_task_id, working_params, script, voice_preview=None
+            )
+            if not audio_file:
+                return sm.state.get_task(resolved_task_id)
+            subtitle_path = generate_subtitle(
+                resolved_task_id, working_params, script, sub_maker, audio_file
+            ) or ""
+        else:
+            audio_duration = remotion.probe_audio_duration(audio_file)
+            if working_params.subtitle_enabled and (
+                plan.revise_script or not os.path.isfile(subtitle_path)
+            ):
+                # Prefer regenerating subtitle timeline when script changed.
+                audio_file, audio_duration, sub_maker = generate_audio(
+                    resolved_task_id, working_params, script, voice_preview=None
+                )
+                if not audio_file:
+                    return sm.state.get_task(resolved_task_id)
+                subtitle_path = generate_subtitle(
+                    resolved_task_id, working_params, script, sub_maker, audio_file
+                ) or ""
+
+        sm.state.update_task(resolved_task_id, progress=55)
+
+        clips = None
+        if plan.regenerate_materials:
+            materials = get_video_materials(
+                resolved_task_id, working_params, video_terms, audio_duration
+            )
+            if not materials:
+                return sm.state.get_task(resolved_task_id)
+            clips = remotion.plan_timeline_clips(
+                video_paths=materials,
+                audio_duration=float(audio_duration or 0),
+                video_concat_mode=working_params.video_concat_mode,
+                video_transition_mode=working_params.video_transition_mode,
+                max_clip_duration=int(working_params.video_clip_duration or 5),
+                clip_speed=float(working_params.video_clip_speed or 1.0),
+            )
+
+        bgm_path = ""
+        props = copy.deepcopy(context.props)
+        if plan.regenerate_bgm:
+            bgm_path = _resolve_remotion_bgm_path(working_params, None)
+        else:
+            # Keep existing relative/absolute BGM; stage_props will resolve public files.
+            bgm_path = ""
+
+        if not props:
+            # Fallback: build from scratch if props missing.
+            if clips is None:
+                raise RuntimeError("Remotion project has no input-props.json and no clips")
+            props = remotion.build_composition_props(
+                clips=clips,
+                params=working_params,
+                audio_path=audio_file,
+                subtitle_path=subtitle_path,
+                bgm_path=bgm_path,
+                visual_only=False,
+            )
+        else:
+            props = remotion.props_with_updated_audio(
+                props,
+                audio_path=audio_file,
+                subtitle_path=subtitle_path or "",
+                params=working_params,
+                clips=clips,
+                bgm_path=bgm_path,
+                audio_duration=float(audio_duration or 0),
+            )
+            if not plan.regenerate_bgm and not bgm_path:
+                # Preserve previous bgmSrc from context props (already in props copy).
+                pass
+
+        sm.state.update_task(resolved_task_id, progress=70)
+        final_video_path = path.join(
+            utils.task_dir(resolved_task_id), f"final-{context.index}.mp4"
+        )
+        remotion.render_existing_project(
+            task_id=resolved_task_id,
+            index=context.index,
+            project_path=context.project_path,
+            props=props,
+            output_file=final_video_path,
+            threads=working_params.n_threads,
+        )
+
+        result = {
+            "task_id": resolved_task_id,
+            "state": const.TASK_STATE_COMPLETE,
+            "progress": 100,
+            "videos": [final_video_path],
+            "combined_videos": [],
+            "remotion_projects": [context.project_path],
+            "script": script,
+            "terms": video_terms,
+            "audio_file": audio_file,
+            "subtitle_path": subtitle_path,
+            "warnings": None,
+        }
+        sm.state.update_task(resolved_task_id, **result)
+        logger.success(
+            f"remotion continue finished: task_id={resolved_task_id}, "
+            f"project={context.project_path}"
+        )
+        return result
+    except Exception as exc:
+        logger.exception(
+            f"remotion continue failed: task_id={resolved_task_id}, error={exc}"
+        )
+        return _mark_task_failed(
+            resolved_task_id,
+            "remotion_continue",
+            f"{type(exc).__name__}: {exc}",
+        )
 
 
 def start(
