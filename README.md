@@ -235,6 +235,16 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 
 首次启动时，项目会根据 `config.example.toml` 自动创建 `config.toml`。大模型 Provider、素材来源和相关 API Key 可以直接在 WebUI 的基础设置中配置。
 
+#### 可选 Remotion 渲染器
+
+默认使用 MoviePy 合成视频。若要用 [Remotion](https://www.remotion.dev/) 完成完整合成（素材拼接、转场、字幕、音频混音）：
+
+1. 安装 [Node.js 18+](https://nodejs.org/)
+2. 执行 `cd remotion && npm install`
+3. 在 `config.toml` 中设置 `video_renderer = "remotion"`，或在 WebUI 视频设置中选择 **Remotion**
+
+详见 [`remotion/README.md`](remotion/README.md)。公司使用 Remotion 可能需要付费许可证：https://www.remotion.dev/docs/license
+
 ### Docker 部署 🐳
 
 #### ① 启动 Docker

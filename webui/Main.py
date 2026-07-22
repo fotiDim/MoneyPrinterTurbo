@@ -40,7 +40,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
-from app.services import cache_manager, llm, video, voice, webui_task
+from app.services import cache_manager, llm, remotion, video, voice, webui_task
 from app.services import elevenlabs_music as elevenlabs_music_service
 from app.services import sonilo as sonilo_service
 from app.services import state as sm
@@ -2226,6 +2226,31 @@ def _render_video_settings(panel, params):
                 (tr("Coverr"), "coverr"),
                 (tr("Local file"), "local"),
             ]
+            video_renderers = [
+                (tr("MoviePy Renderer"), "moviepy"),
+                (tr("Remotion Renderer"), "remotion"),
+            ]
+            saved_renderer = str(
+                config.app.get("video_renderer", "moviepy") or "moviepy"
+            ).strip().lower()
+            if saved_renderer not in ("moviepy", "remotion"):
+                saved_renderer = "moviepy"
+            selected_renderer = stable_selectbox(
+                tr("Video Renderer"),
+                options=[value for _, value in video_renderers],
+                default_value=saved_renderer,
+                key="video_renderer_select",
+                format_func=lambda value: dict(
+                    (v, label) for label, v in video_renderers
+                )[value],
+                help=tr("Video Renderer Help"),
+            )
+            config.app["video_renderer"] = selected_renderer
+            if selected_renderer == "remotion":
+                readiness = remotion.get_readiness()
+                if not readiness.ready:
+                    st.warning(tr("Remotion Not Ready"))
+                    st.caption(readiness.message)
 
             saved_video_source_name = config.app.get("video_source", "pexels")
 
@@ -3713,6 +3738,12 @@ def _render_generation_controls(
         if params.video_source not in ["pexels", "pixabay", "coverr", "local"]:
             _remove_active_generation_task(task_id)
             st.error(tr("Please Select a Valid Video Source"))
+            st.stop()
+
+        if remotion.is_requested() and not remotion.is_enabled():
+            _remove_active_generation_task(task_id)
+            st.error(tr("Remotion Not Ready"))
+            st.caption(remotion.get_readiness().message)
             st.stop()
 
         if params.video_source == "pexels" and not config.app.get(

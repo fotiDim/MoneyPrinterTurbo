@@ -225,6 +225,16 @@ subtitle_provider = "edge"
 # "h264_mf", "h264_videotoolbox".
 # video_codec = "libx264"
 
+# Optional Remotion full composition renderer (https://www.remotion.dev/).
+# Default is MoviePy. Set to "remotion" to compose clips, transitions, subtitles,
+# and audio with the bundled remotion/ project instead. Requires Node.js 18+ and
+# `cd remotion && npm install`. Remotion has a special license for companies:
+# https://www.remotion.dev/docs/license
+# Available values: "moviepy", "remotion".
+video_renderer = "moviepy"
+# Remotion render concurrency (parallel frames). Leave unset to use Remotion's default.
+# remotion_concurrency = 2
+
 # -----------------------------------------------------------------------------
 # Storage and Task Runtime / 存储与任务运行
 # -----------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from app.services import (
     elevenlabs_music,
     llm,
     material,
+    remotion,
     sonilo,
     subtitle,
     twelvelabs,
@@ -607,6 +608,176 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
         return downloaded_videos
 
 
+def _resolve_video_music_bgm(
+    *,
+    task_id: str,
+    params: VideoParams,
+    index: int,
+    combined_video_path: str,
+    audio_duration: float,
+    video_music_provider: dict | None,
+    video_music_requested: bool,
+    warnings: list,
+) -> str | None:
+    """
+    解析当前成片的 BGM 文件。
+
+    返回值语义与 ``video.generate_video`` 的 ``bgm_file_override`` 一致：
+    ``None`` 表示走随机/自定义 BGM；空字符串表示明确禁用本条 BGM。
+    """
+    bgm_file_override = "" if video_music_provider else None
+    if not video_music_requested or video_music_provider is None:
+        return bgm_file_override
+
+    service = video_music_provider["service"]
+    display_name = video_music_provider["display_name"]
+    warning_code = video_music_provider["warning_code"]
+    generated_bgm_path = path.join(
+        utils.task_dir(task_id),
+        f"{params.bgm_type}-bgm-{index}{video_music_provider['suffix']}",
+    )
+    try:
+        service.generate_bgm(
+            video_path=combined_video_path,
+            output_path=generated_bgm_path,
+            video_duration=audio_duration,
+            prompt=_get_video_music_prompt(params),
+        )
+        return generated_bgm_path
+    except video_music_provider["error_type"] as exc:
+        # 视频、旁白和字幕都已生成时，第三方配乐临时失败不应浪费整条
+        # 任务。当前视频明确禁用 BGM，并把降级结果返回 WebUI 提醒用户。
+        logger.warning(
+            f"{display_name} BGM generation failed: task_id={task_id}, "
+            f"video_index={index}, error={exc}"
+        )
+        warnings.append({"code": warning_code, "video_index": index})
+        return ""
+
+
+def _resolve_remotion_bgm_path(
+    params: VideoParams, bgm_file_override: str | None
+) -> str:
+    """把 MoviePy 的 BGM 解析规则落到 Remotion props 可用的绝对路径。"""
+    if not bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume):
+        return ""
+    if bgm_file_override is not None:
+        return bgm_file_override or ""
+    return video.get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file) or ""
+
+
+def _generate_final_videos_with_remotion(
+    task_id,
+    params,
+    downloaded_videos,
+    audio_file,
+    subtitle_path,
+    audio_duration,
+    video_concat_mode,
+    video_transition_mode,
+    video_music_provider,
+    video_music_requested,
+):
+    """Remotion 全量合成：先画面轨，再按需配乐，最后旁白/字幕/BGM 成片。"""
+    remotion.ensure_ready()
+    final_video_paths = []
+    combined_video_paths = []
+    warnings = []
+    progress = 50
+
+    for i in range(params.video_count):
+        index = i + 1
+        combined_video_path = path.join(
+            utils.task_dir(task_id), f"combined-{index}.mp4"
+        )
+        final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
+        logger.info(
+            f"\n\n## Remotion combining video: {index} => {combined_video_path}"
+        )
+        _, clips = remotion.render_composition(
+            task_id=task_id,
+            index=index,
+            video_paths=downloaded_videos,
+            audio_file=audio_file,
+            subtitle_path=subtitle_path,
+            params=params,
+            audio_duration=audio_duration,
+            video_concat_mode=video_concat_mode,
+            video_transition_mode=video_transition_mode,
+            output_file=combined_video_path,
+            visual_only=True,
+        )
+        progress += 50 / params.video_count / 2
+        sm.state.update_task(task_id, progress=progress)
+
+        bgm_file_override = _resolve_video_music_bgm(
+            task_id=task_id,
+            params=params,
+            index=index,
+            combined_video_path=combined_video_path,
+            audio_duration=audio_duration,
+            video_music_provider=video_music_provider,
+            video_music_requested=video_music_requested,
+            warnings=warnings,
+        )
+        bgm_path = _resolve_remotion_bgm_path(params, bgm_file_override)
+
+        logger.info(f"\n\n## Remotion generating video: {index} => {final_video_path}")
+        try:
+            remotion.render_composition(
+                task_id=task_id,
+                index=index,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                subtitle_path=subtitle_path,
+                params=params,
+                audio_duration=audio_duration,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                output_file=final_video_path,
+                visual_only=False,
+                bgm_path=bgm_path,
+                clips=clips,
+            )
+        except remotion.RemotionRenderError:
+            if video_music_provider is not None and bgm_path:
+                # 最终混音失败时降级为无 BGM 再渲染一次，与 MoviePy 路径的
+                # “保留无 BGM 成片 + 警告”行为对齐。
+                logger.exception(
+                    "Remotion final render with BGM failed; retrying without BGM"
+                )
+                remotion.render_composition(
+                    task_id=task_id,
+                    index=index,
+                    video_paths=downloaded_videos,
+                    audio_file=audio_file,
+                    subtitle_path=subtitle_path,
+                    params=params,
+                    audio_duration=audio_duration,
+                    video_concat_mode=video_concat_mode,
+                    video_transition_mode=video_transition_mode,
+                    output_file=final_video_path,
+                    visual_only=False,
+                    bgm_path="",
+                    clips=clips,
+                )
+                warnings.append(
+                    {
+                        "code": video_music_provider["warning_code"],
+                        "video_index": index,
+                    }
+                )
+            else:
+                raise
+
+        progress += 50 / params.video_count / 2
+        sm.state.update_task(task_id, progress=progress)
+        final_video_paths.append(final_video_path)
+        combined_video_paths.append(combined_video_path)
+
+    return final_video_paths, combined_video_paths, warnings
+
+
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
@@ -627,6 +798,22 @@ def generate_final_videos(
     else:
         video_concat_mode = VideoConcatMode.random
     video_transition_mode = params.video_transition_mode
+
+    if remotion.is_requested():
+        # 用户明确选择 Remotion 时不回退 MoviePy，避免“看起来启用了 Remotion
+        # 实际仍是 MoviePy”的静默降级。
+        return _generate_final_videos_with_remotion(
+            task_id=task_id,
+            params=params,
+            downloaded_videos=downloaded_videos,
+            audio_file=audio_file,
+            subtitle_path=subtitle_path,
+            audio_duration=audio_duration,
+            video_concat_mode=video_concat_mode,
+            video_transition_mode=video_transition_mode,
+            video_music_provider=video_music_provider,
+            video_music_requested=video_music_requested,
+        )
 
     _progress = 50
     for i in range(params.video_count):
@@ -652,34 +839,16 @@ def generate_final_videos(
 
         final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
 
-        # 视频配乐模式先明确禁用默认 BGM 解析，避免旧任务残留的 bgm_file 被
-        # 误用。只有音量大于 0 才生成代理并调用付费 API；0 音量统一跳过。
-        bgm_file_override = "" if video_music_provider else None
-        if video_music_requested:
-            service = video_music_provider["service"]
-            display_name = video_music_provider["display_name"]
-            warning_code = video_music_provider["warning_code"]
-            generated_bgm_path = path.join(
-                utils.task_dir(task_id),
-                (f"{params.bgm_type}-bgm-{index}{video_music_provider['suffix']}"),
-            )
-            try:
-                service.generate_bgm(
-                    video_path=combined_video_path,
-                    output_path=generated_bgm_path,
-                    video_duration=audio_duration,
-                    prompt=_get_video_music_prompt(params),
-                )
-                bgm_file_override = generated_bgm_path
-            except video_music_provider["error_type"] as exc:
-                # 视频、旁白和字幕都已生成时，第三方配乐临时失败不应浪费整条
-                # 任务。当前视频明确禁用 BGM，并把降级结果返回 WebUI 提醒用户。
-                logger.warning(
-                    f"{display_name} BGM generation failed: task_id={task_id}, "
-                    f"video_index={index}, error={exc}"
-                )
-                bgm_file_override = ""
-                warnings.append({"code": warning_code, "video_index": index})
+        bgm_file_override = _resolve_video_music_bgm(
+            task_id=task_id,
+            params=params,
+            index=index,
+            combined_video_path=combined_video_path,
+            audio_duration=audio_duration,
+            video_music_provider=video_music_provider,
+            video_music_requested=video_music_requested,
+            warnings=warnings,
+        )
 
         logger.info(f"\n\n## generating video: {index} => {final_video_path}")
         bgm_mix_succeeded = video.generate_video(

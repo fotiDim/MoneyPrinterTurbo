@@ -240,6 +240,16 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 
 On first launch, the project creates `config.toml` from `config.example.toml`. You can configure the LLM provider, footage source, and related API keys directly in the WebUI basic settings.
 
+#### Optional Remotion renderer
+
+By default, videos are composed with MoviePy. To use [Remotion](https://www.remotion.dev/) for full composition (clips, transitions, subtitles, and audio mix):
+
+1. Install [Node.js 18+](https://nodejs.org/)
+2. `cd remotion && npm install`
+3. Set `video_renderer = "remotion"` in `config.toml`, or choose **Remotion** under Video Settings in the WebUI
+
+See [`remotion/README.md`](remotion/README.md). Remotion has a special license for companies: https://www.remotion.dev/docs/license
+
 ### Docker Deployment 🐳
 
 #### ① Launch the Docker Container

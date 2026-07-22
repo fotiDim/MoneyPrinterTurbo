@@ -29,8 +29,15 @@ class TestTaskService(unittest.TestCase):
         # 影响后续恢复测试，同时不会触碰真正线程池中的生产任务。
         with tm._cross_post_registry_lock:
             tm._cross_post_futures.clear()
-    
+        # MoviePy 是默认路径；显式关掉 Remotion，避免本机 config.toml 启用
+        # Remotion 后让既有合成编排测试误走 Node 渲染分支。
+        self._remotion_requested_patcher = patch.object(
+            tm.remotion, "is_requested", return_value=False
+        )
+        self._remotion_requested_patcher.start()
+
     def tearDown(self):
+        self._remotion_requested_patcher.stop()
         with tm._cross_post_registry_lock:
             tm._cross_post_futures.clear()
 
@@ -99,6 +106,7 @@ class TestTaskService(unittest.TestCase):
             patch.object(tm.video, "combine_videos") as combine_videos,
             patch.object(tm.video, "generate_video"),
             patch.object(tm.sm.state, "update_task"),
+            patch.object(tm.remotion, "is_requested", return_value=False),
         ):
             tm.generate_final_videos(
                 task_id="clip-speed-task",

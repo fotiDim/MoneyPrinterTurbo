@@ -15,6 +15,8 @@ __pycache__
 logs/
 
 node_modules
+remotion/out
+remotion/dist
 # VuePress 默认临时文件目录
 /sites/docs/.vuepress/.temp
 # VuePress 默认缓存目录
