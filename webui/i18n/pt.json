@@ -280,6 +280,12 @@
         "Please Enter the Coverr API Key": "Por favor, insira a **Chave de API do Coverr**",
         "Video Encoder": "Codificador de vídeo",
         "Default Video Encoder": "Padrão (recomendado)",
-        "Video Encoder Help": "Opção avançada. Padrão segue a política estável do aplicativo, atualmente libx264. Se um codificador de hardware não estiver disponível, o aplicativo retorna automaticamente para libx264."
+        "Video Encoder Help": "Opção avançada. Padrão segue a política estável do aplicativo, atualmente libx264. Se um codificador de hardware não estiver disponível, o aplicativo retorna automaticamente para libx264.",
+        "Remotion Seed Project": "Style Seed (past Remotion project)",
+        "Remotion Seed None": "Default template (no seed)",
+        "Remotion Seed Help": "Reuse composition effects, transitions, subtitle look, and BGM from a past remotion-* project. New script, voiceover, and product clips are still generated.",
+        "Remotion Seed Path": "Or seed project path",
+        "Remotion Seed Path Help": "Optional absolute/relative path to a remotion-* folder. Overrides the dropdown when set.",
+        "Remotion Seed Applied": "Seed style applied to transition, subtitles, and BGM. Edit any field to override."
     }
 }

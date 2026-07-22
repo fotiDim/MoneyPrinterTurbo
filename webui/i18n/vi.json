@@ -280,6 +280,12 @@
         "Please Enter the Coverr API Key": "Vui lòng nhập **API Key Coverr**",
         "Video Encoder": "Bộ Mã Hóa Video",
         "Default Video Encoder": "Mặc định (Khuyên dùng)",
-        "Video Encoder Help": "Tùy chọn nâng cao. Mặc định tuân theo chính sách mã hóa ổn định của ứng dụng, hiện là libx264. Nếu bộ mã hóa phần cứng không khả dụng, ứng dụng tự động chuyển về libx264."
+        "Video Encoder Help": "Tùy chọn nâng cao. Mặc định tuân theo chính sách mã hóa ổn định của ứng dụng, hiện là libx264. Nếu bộ mã hóa phần cứng không khả dụng, ứng dụng tự động chuyển về libx264.",
+        "Remotion Seed Project": "Style Seed (past Remotion project)",
+        "Remotion Seed None": "Default template (no seed)",
+        "Remotion Seed Help": "Reuse composition effects, transitions, subtitle look, and BGM from a past remotion-* project. New script, voiceover, and product clips are still generated.",
+        "Remotion Seed Path": "Or seed project path",
+        "Remotion Seed Path Help": "Optional absolute/relative path to a remotion-* folder. Overrides the dropdown when set.",
+        "Remotion Seed Applied": "Seed style applied to transition, subtitles, and BGM. Edit any field to override."
     }
 }

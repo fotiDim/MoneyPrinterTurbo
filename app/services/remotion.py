@@ -3,8 +3,9 @@ Optional Remotion (https://www.remotion.dev/) full composition renderer.
 
 When ``video_renderer = "remotion"`` in config.toml, MoneyPrinterTurbo scaffolds
 a standalone Remotion project per output video under
-``storage/tasks/<task_id>/remotion-<index>/``, stages media into that project's
-``public/``, and renders from it so the composition stays editable in Studio.
+``storage/tasks/<task_id>/remotion-<title-slug>-<task8>-<index>/``, stages media
+into that project's ``public/``, and renders from it so the composition stays
+editable in Studio.
 
 Setup:
   1. Install Node.js 18+
@@ -64,6 +65,30 @@ class RemotionRenderError(RuntimeError):
     """Raised when the Remotion CLI render fails."""
 
 
+class RemotionSeedError(ValueError):
+    """Raised when a Remotion style seed path is invalid."""
+
+
+@dataclass(frozen=True)
+class RemotionSeedProject:
+    path: str
+    task_id: str
+    label: str
+    mtime: float
+
+
+@dataclass(frozen=True)
+class RemotionSeedPackage:
+    path: str
+    subtitle_style: dict[str, Any]
+    transition_duration_in_frames: Optional[int]
+    dominant_transition: Optional[str]
+    bgm_path: str
+    bgm_volume: Optional[float]
+    voice_volume: Optional[float]
+    font_path: str
+
+
 @dataclass(frozen=True)
 class RemotionReadiness:
     requested: bool
@@ -100,8 +125,62 @@ def project_dir() -> str:
     return template_dir()
 
 
-def standalone_project_dir(task_id: str, index: int) -> str:
-    return os.path.join(utils.task_dir(task_id), f"remotion-{index}")
+def standalone_project_dir(
+    task_id: str,
+    index: int,
+    *,
+    title: Optional[str] = None,
+) -> str:
+    """Path to the per-video Remotion project folder (unique per task + index)."""
+    return os.path.join(
+        utils.task_dir(task_id),
+        project_folder_name(task_id, index, title=title),
+    )
+
+
+def project_folder_name(
+    task_id: str,
+    index: int,
+    *,
+    title: Optional[str] = None,
+) -> str:
+    """
+    Unique Remotion project directory name shown in Studio.
+
+    Uses a slug of the task title (video subject) plus a short task id so
+    projects are readable and never collide across tasks.
+    """
+    short_id = re.sub(r"[^a-zA-Z0-9]+", "", str(task_id or ""))[:8].lower() or "task"
+    slug = _slugify_title(title)
+    if slug:
+        return f"remotion-{slug}-{short_id}-{index}"
+    return f"remotion-{short_id}-{index}"
+
+
+def npm_package_name(
+    task_id: str,
+    index: int,
+    *,
+    title: Optional[str] = None,
+) -> str:
+    """Valid npm package name for the standalone Remotion project."""
+    folder = project_folder_name(task_id, index, title=title)
+    # npm names: lowercase, URL-safe; keep under a reasonable length.
+    name = folder.lower().replace("_", "-")
+    name = re.sub(r"[^a-z0-9-]+", "-", name).strip("-")
+    return (name or f"mpt-remotion-{index}")[:214]
+
+
+def _slugify_title(title: Optional[str], *, max_len: int = 40) -> str:
+    raw = str(title or "").strip().lower()
+    if not raw:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    if not slug:
+        return ""
+    if len(slug) > max_len:
+        slug = slug[:max_len].rstrip("-")
+    return slug
 
 
 def is_requested() -> bool:
@@ -134,6 +213,290 @@ def ensure_ready() -> None:
     readiness = get_readiness()
     if readiness.requested and not readiness.ready:
         raise RemotionNotReadyError(readiness.message)
+
+
+_SUBTITLE_STYLE_KEYS = (
+    "fontSize",
+    "color",
+    "strokeColor",
+    "strokeWidth",
+    "position",
+    "customPosition",
+    "backgroundColor",
+    "roundedBackground",
+)
+
+_TRANSITION_NAME_TO_MODE = {
+    "FadeIn": VideoTransitionMode.fade_in,
+    "FadeOut": VideoTransitionMode.fade_out,
+    "SlideIn": VideoTransitionMode.slide_in,
+    "SlideOut": VideoTransitionMode.slide_out,
+    "ZoomIn": VideoTransitionMode.zoom_in,
+    "ZoomOut": VideoTransitionMode.zoom_out,
+}
+
+
+def validate_seed_project(path: str) -> str:
+    """Resolve and validate a Remotion seed project directory."""
+    raw = (path or "").strip()
+    if not raw:
+        raise RemotionSeedError("Remotion seed path is empty.")
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isdir(expanded):
+        raise RemotionSeedError(f"Remotion seed project not found: {expanded}")
+    src_dir = os.path.join(expanded, "src")
+    if not os.path.isdir(src_dir):
+        raise RemotionSeedError(
+            f"Remotion seed is missing src/: {expanded}"
+        )
+    return expanded
+
+
+def list_seed_projects(limit: int = 30) -> List[RemotionSeedProject]:
+    """Discover past task remotion-* projects, newest first."""
+    tasks_root = utils.storage_dir("tasks")
+    if not os.path.isdir(tasks_root):
+        return []
+
+    found: List[RemotionSeedProject] = []
+    try:
+        task_names = os.listdir(tasks_root)
+    except OSError:
+        return []
+
+    for task_id in task_names:
+        task_path = os.path.join(tasks_root, task_id)
+        if not os.path.isdir(task_path):
+            continue
+        try:
+            entries = os.listdir(task_path)
+        except OSError:
+            continue
+        for name in entries:
+            if not name.startswith("remotion-"):
+                continue
+            project_path = os.path.join(task_path, name)
+            if not os.path.isdir(os.path.join(project_path, "src")):
+                continue
+            try:
+                mtime = os.path.getmtime(project_path)
+            except OSError:
+                mtime = 0.0
+            short_task = task_id if len(task_id) <= 12 else f"{task_id[:8]}…"
+            found.append(
+                RemotionSeedProject(
+                    path=os.path.abspath(project_path),
+                    task_id=task_id,
+                    label=f"{short_task} / {name}",
+                    mtime=mtime,
+                )
+            )
+
+    found.sort(key=lambda item: item.mtime, reverse=True)
+    if limit > 0:
+        return found[:limit]
+    return found
+
+
+def _resolve_seed_asset_path(seed_path: str, relative_or_abs: str) -> str:
+    if not relative_or_abs:
+        return ""
+    candidate = relative_or_abs
+    if not os.path.isabs(candidate):
+        public_candidate = os.path.join(seed_path, "public", candidate)
+        if os.path.isfile(public_candidate):
+            return os.path.abspath(public_candidate)
+        nested = os.path.join(seed_path, candidate)
+        if os.path.isfile(nested):
+            return os.path.abspath(nested)
+        return ""
+    if os.path.isfile(candidate):
+        return os.path.abspath(candidate)
+    return ""
+
+
+def dominant_transition_from_clips(clips: List[dict[str, Any]]) -> Optional[str]:
+    counts: dict[str, int] = {}
+    for clip in clips or []:
+        name = str(clip.get("transition") or "").strip()
+        if not name or name.lower() == "none":
+            continue
+        if name not in _CONCRETE_TRANSITIONS:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def load_seed_package(path: str) -> RemotionSeedPackage:
+    """Load style, motion, and BGM metadata from a seed project's input-props."""
+    seed_path = validate_seed_project(path)
+    props_path = os.path.join(seed_path, "input-props.json")
+    props: dict[str, Any] = {}
+    if os.path.isfile(props_path):
+        try:
+            with open(props_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                props = loaded
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(f"failed to read seed input-props.json: {exc}")
+
+    raw_subs = props.get("subtitles") if isinstance(props.get("subtitles"), dict) else {}
+    subtitle_style = {
+        key: raw_subs[key] for key in _SUBTITLE_STYLE_KEYS if key in raw_subs
+    }
+
+    transition_duration = props.get("transitionDurationInFrames")
+    try:
+        transition_duration_in_frames = (
+            int(transition_duration) if transition_duration is not None else None
+        )
+    except (TypeError, ValueError):
+        transition_duration_in_frames = None
+
+    clips = props.get("clips") if isinstance(props.get("clips"), list) else []
+    dominant = dominant_transition_from_clips(clips)
+
+    bgm_src = str(props.get("bgmSrc") or "")
+    bgm_path = _resolve_seed_asset_path(seed_path, bgm_src)
+    font_src = str(raw_subs.get("fontPath") or "")
+    font_path = _resolve_seed_asset_path(seed_path, font_src)
+
+    bgm_volume = props.get("bgmVolume")
+    try:
+        bgm_volume_value = float(bgm_volume) if bgm_volume is not None else None
+    except (TypeError, ValueError):
+        bgm_volume_value = None
+
+    voice_volume = props.get("voiceVolume")
+    try:
+        voice_volume_value = float(voice_volume) if voice_volume is not None else None
+    except (TypeError, ValueError):
+        voice_volume_value = None
+
+    return RemotionSeedPackage(
+        path=seed_path,
+        subtitle_style=subtitle_style,
+        transition_duration_in_frames=transition_duration_in_frames,
+        dominant_transition=dominant,
+        bgm_path=bgm_path,
+        bgm_volume=bgm_volume_value,
+        voice_volume=voice_volume_value,
+        font_path=font_path,
+    )
+
+
+def resolve_seed_bgm_file(seed_path: str) -> str:
+    """Return absolute BGM path from a seed project, or empty string."""
+    try:
+        package = load_seed_package(seed_path)
+    except RemotionSeedError:
+        return ""
+    return package.bgm_path if package.bgm_path and os.path.isfile(package.bgm_path) else ""
+
+
+def resolve_transition_mode_with_seed(
+    transition_mode: Optional[VideoTransitionMode],
+    package: Optional[RemotionSeedPackage],
+) -> Optional[VideoTransitionMode]:
+    """Prefer an explicit concrete mode; otherwise use the seed's dominant transition."""
+    value = getattr(transition_mode, "value", transition_mode)
+    if value in _CONCRETE_TRANSITIONS:
+        return transition_mode if isinstance(transition_mode, VideoTransitionMode) else VideoTransitionMode(value)
+    if package and package.dominant_transition:
+        mapped = _TRANSITION_NAME_TO_MODE.get(package.dominant_transition)
+        if mapped is not None:
+            return mapped
+    return transition_mode
+
+
+def merge_seed_defaults_into_params(params: VideoParams) -> VideoParams:
+    """
+    Prefill unset/weak style fields from a Remotion seed.
+
+    Used by CLI (and reusable by WebUI). Explicit concrete transition modes and
+    custom BGM files are left alone.
+    """
+    seed = str(getattr(params, "remotion_seed", None) or "").strip()
+    if not seed:
+        return params
+    package = load_seed_package(seed)
+
+    mode_value = getattr(params.video_transition_mode, "value", params.video_transition_mode)
+    if mode_value not in _CONCRETE_TRANSITIONS and package.dominant_transition:
+        mapped = _TRANSITION_NAME_TO_MODE.get(package.dominant_transition)
+        if mapped is not None:
+            params.video_transition_mode = mapped
+
+    style = package.subtitle_style
+    if "fontSize" in style and params.font_size == 60:
+        try:
+            params.font_size = int(style["fontSize"])
+        except (TypeError, ValueError):
+            pass
+    if "color" in style and (not params.text_fore_color or params.text_fore_color == "#FFFFFF"):
+        params.text_fore_color = str(style["color"])
+    if "strokeColor" in style and (
+        not params.stroke_color or params.stroke_color == "#000000"
+    ):
+        params.stroke_color = str(style["strokeColor"])
+    if "strokeWidth" in style and params.stroke_width == 1.5:
+        try:
+            params.stroke_width = float(style["strokeWidth"])
+        except (TypeError, ValueError):
+            pass
+    if "position" in style and (
+        not params.subtitle_position
+        or params.subtitle_position == config.ui.get("subtitle_position", "bottom")
+    ):
+        params.subtitle_position = str(style["position"])
+    if "customPosition" in style and params.custom_position == float(
+        config.ui.get("custom_position", 70.0)
+    ):
+        try:
+            params.custom_position = float(style["customPosition"])
+        except (TypeError, ValueError):
+            pass
+    if "backgroundColor" in style:
+        bg = style["backgroundColor"]
+        if params.text_background_color in (False, None, ""):
+            params.text_background_color = bg if bg else False
+    if "roundedBackground" in style and not params.rounded_subtitle_background:
+        params.rounded_subtitle_background = bool(style["roundedBackground"])
+
+    if package.bgm_volume is not None and params.bgm_volume == 0.2:
+        params.bgm_volume = package.bgm_volume
+    if package.voice_volume is not None and params.voice_volume == 1.0:
+        params.voice_volume = package.voice_volume
+
+    if package.bgm_path and os.path.isfile(package.bgm_path):
+        bgm_type = str(params.bgm_type or "").strip().lower()
+        if bgm_type in ("", "random") and not (params.bgm_file or "").strip():
+            params.bgm_type = "custom"
+            params.bgm_file = package.bgm_path
+
+    return params
+
+
+def apply_seed_package_to_props(
+    props: dict[str, Any],
+    package: RemotionSeedPackage,
+) -> dict[str, Any]:
+    """Overlay motion duration and brand font from seed; never touch clips/narration/cues."""
+    updated = copy.deepcopy(props)
+    if package.transition_duration_in_frames is not None:
+        updated["transitionDurationInFrames"] = max(
+            1, int(package.transition_duration_in_frames)
+        )
+    if package.bgm_volume is not None and updated.get("bgmSrc"):
+        updated["bgmVolume"] = float(package.bgm_volume)
+    subtitles = dict(updated.get("subtitles") or {})
+    if package.font_path and os.path.isfile(package.font_path):
+        subtitles["fontPath"] = package.font_path
+    updated["subtitles"] = subtitles
+    return updated
 
 
 def _seconds_to_frames(seconds: float, *, minimum: int = 1) -> int:
@@ -430,19 +793,59 @@ Remotion license: https://www.remotion.dev/docs/license
         handle.write(content)
 
 
-def scaffold_project(task_id: str, index: int) -> str:
-    """
-    Create ``storage/tasks/<task_id>/remotion-<index>/`` from the shared template.
+def _write_project_package_json(
+    project_path: str,
+    *,
+    task_id: str,
+    index: int,
+    title: Optional[str] = None,
+) -> None:
+    """Rewrite package.json name so Studio / npm identity matches this task."""
+    package_path = os.path.join(project_path, "package.json")
+    if not os.path.isfile(package_path):
+        return
+    try:
+        with open(package_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    data["name"] = npm_package_name(task_id, index, title=title)
+    subject = str(title or "").strip()
+    if subject:
+        data["description"] = f"MoneyPrinterTurbo Remotion project: {subject}"
+    with open(package_path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
 
-    Media is staged later into this project's ``public/``. ``node_modules`` is
-    symlinked to the shared template install so each task does not reinstall.
+
+def scaffold_project(
+    task_id: str,
+    index: int,
+    *,
+    seed_path: Optional[str] = None,
+    title: Optional[str] = None,
+) -> str:
+    """
+    Create a uniquely named Remotion project under the task directory.
+
+    Folder form: ``remotion-<title-slug>-<task8>-<index>/``. When ``seed_path``
+    is set, composition ``src/`` is copied from that past project. Packaging
+    still comes from the shared template. Media is staged later into ``public/``.
     """
     ensure_ready()
     template = template_dir()
-    project_path = standalone_project_dir(task_id, index)
+    project_path = standalone_project_dir(task_id, index, title=title)
     os.makedirs(project_path, exist_ok=True)
 
-    src_src = os.path.join(template, "src")
+    src_source_root = template
+    if seed_path:
+        validated_seed = validate_seed_project(seed_path)
+        src_source_root = validated_seed
+        logger.info(f"scaffolding Remotion project from seed: {validated_seed}")
+
+    src_src = os.path.join(src_source_root, "src")
     src_dst = os.path.join(project_path, "src")
     if os.path.isdir(src_dst):
         shutil.rmtree(src_dst)
@@ -452,6 +855,10 @@ def scaffold_project(task_id: str, index: int) -> str:
         src_file = os.path.join(template, name)
         if os.path.isfile(src_file):
             shutil.copy2(src_file, os.path.join(project_path, name))
+
+    _write_project_package_json(
+        project_path, task_id=task_id, index=index, title=title
+    )
 
     public_path = os.path.join(project_path, "public")
     os.makedirs(public_path, exist_ok=True)
@@ -667,17 +1074,43 @@ def render_composition(
     for editing in Remotion Studio.
     """
     ensure_ready()
+    seed_raw = str(getattr(params, "remotion_seed", None) or "").strip()
+    seed_package: Optional[RemotionSeedPackage] = None
+    if seed_raw:
+        if not is_requested():
+            logger.warning(
+                "remotion_seed is set but video_renderer is not remotion; ignoring seed"
+            )
+        else:
+            seed_package = load_seed_package(seed_raw)
+
+    seed_for_scaffold = seed_package.path if seed_package else None
+    project_title = str(getattr(params, "video_subject", None) or "").strip() or None
     if project_path is None:
-        project_path = scaffold_project(task_id, index)
+        project_path = scaffold_project(
+            task_id,
+            index,
+            seed_path=seed_for_scaffold,
+            title=project_title,
+        )
     elif not os.path.isdir(project_path):
-        project_path = scaffold_project(task_id, index)
+        project_path = scaffold_project(
+            task_id,
+            index,
+            seed_path=seed_for_scaffold,
+            title=project_title,
+        )
+
+    effective_transition = resolve_transition_mode_with_seed(
+        video_transition_mode, seed_package
+    )
 
     if clips is None:
         clips = plan_timeline_clips(
             video_paths=video_paths,
             audio_duration=audio_duration,
             video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
+            video_transition_mode=effective_transition,
             max_clip_duration=int(params.video_clip_duration or 5),
             clip_speed=float(params.video_clip_speed or 1.0),
         )
@@ -690,6 +1123,9 @@ def render_composition(
         bgm_path=bgm_path,
         visual_only=visual_only,
     )
+    if seed_package is not None:
+        props = apply_seed_package_to_props(props, seed_package)
+
     staged_props = stage_props_into_project(props, project_path=project_path)
 
     # Canonical props for Studio / re-render. Visual-only passes write a sibling

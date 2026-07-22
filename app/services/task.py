@@ -663,6 +663,18 @@ def _resolve_remotion_bgm_path(
         return ""
     if bgm_file_override is not None:
         return bgm_file_override or ""
+
+    bgm_type = str(params.bgm_type or "").strip().lower()
+    custom_file = str(params.bgm_file or "").strip()
+    if bgm_type == "custom" and custom_file:
+        return video.get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file) or ""
+
+    seed = str(getattr(params, "remotion_seed", None) or "").strip()
+    if seed:
+        seed_bgm = remotion.resolve_seed_bgm_file(seed)
+        if seed_bgm:
+            return seed_bgm
+
     return video.get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file) or ""
 
 
@@ -680,15 +692,25 @@ def _generate_final_videos_with_remotion(
 ):
     """Remotion 全量合成：脚手架独立项目，先画面轨，再按需配乐，最后成片。"""
     remotion.ensure_ready()
+    if str(getattr(params, "remotion_seed", None) or "").strip():
+        params = remotion.merge_seed_defaults_into_params(params)
+
     final_video_paths = []
     combined_video_paths = []
     remotion_project_paths = []
     warnings = []
     progress = 50
+    seed_path = str(getattr(params, "remotion_seed", None) or "").strip() or None
+    project_title = str(getattr(params, "video_subject", None) or "").strip() or None
 
     for i in range(params.video_count):
         index = i + 1
-        project_path = remotion.scaffold_project(task_id, index)
+        project_path = remotion.scaffold_project(
+            task_id,
+            index,
+            seed_path=seed_path,
+            title=project_title,
+        )
         combined_video_path = path.join(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
@@ -796,6 +818,10 @@ def generate_final_videos(
         video_music_provider is not None
         and bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
     )
+    if str(getattr(params, "remotion_seed", None) or "").strip() and not remotion.is_requested():
+        logger.warning(
+            "remotion_seed is set but video_renderer is not remotion; ignoring seed"
+        )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
     # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
     if params.match_materials_to_script:

@@ -281,6 +281,15 @@ Output and exit status:
         default=None,
         help="FFmpeg worker thread count, at least 1 (default: 2)",
     )
+    video_group.add_argument(
+        "--remotion-seed",
+        default=None,
+        metavar="PATH",
+        help=(
+            "reuse composition src, transitions, subtitle look, and BGM from an "
+            "existing storage/tasks/.../remotion-* project (Remotion renderer only)"
+        ),
+    )
 
     audio_group = parser.add_argument_group("voiceover and background music")
     audio_group.add_argument(
@@ -555,6 +564,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "stroke_color",
         "stroke_width",
         "rounded_subtitle_background",
+        "remotion_seed",
     ]
     for name in optional_arg_names:
         value = getattr(args, name)
@@ -569,7 +579,12 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
     elif args.subtitle_background_enabled is True:
         params_kwargs["text_background_color"] = True
 
-    return VideoParams(**params_kwargs)
+    params = VideoParams(**params_kwargs)
+    if params.remotion_seed:
+        from app.services import remotion as remotion_service
+
+        params = remotion_service.merge_seed_defaults_into_params(params)
+    return params
 
 
 def _resolve_cli_file(

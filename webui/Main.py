@@ -872,6 +872,60 @@ def _set_stable_widget_value(key, value):
         st.session_state[localized_widget_key(key)] = value
 
 
+def _apply_remotion_seed_to_ui(seed_path: str) -> None:
+    """Prefill transition, subtitle, and BGM widgets from a Remotion seed project."""
+    package = remotion.load_seed_package(seed_path)
+    if package.dominant_transition:
+        _set_stable_widget_value(
+            "video_transition_mode_select", package.dominant_transition
+        )
+    if package.bgm_volume is not None:
+        _set_stable_widget_value("bgm_volume_select", package.bgm_volume)
+    if package.voice_volume is not None:
+        _set_stable_widget_value("voice_volume_select", package.voice_volume)
+    if package.bgm_path and os.path.isfile(package.bgm_path):
+        _set_stable_widget_value("bgm_type_select", "custom")
+        st.session_state["custom_bgm_file_input"] = package.bgm_path
+
+    style = package.subtitle_style
+    if "fontSize" in style:
+        try:
+            st.session_state["font_size_slider"] = min(
+                100, max(30, int(style["fontSize"]))
+            )
+        except (TypeError, ValueError):
+            pass
+    if "color" in style and style["color"]:
+        st.session_state["font_color_picker"] = str(style["color"])
+    if "strokeColor" in style and style["strokeColor"]:
+        st.session_state["stroke_color_picker"] = str(style["strokeColor"])
+    if "strokeWidth" in style:
+        try:
+            st.session_state["stroke_width_slider"] = min(
+                10.0, max(0.0, float(style["strokeWidth"]))
+            )
+        except (TypeError, ValueError):
+            pass
+    if "position" in style and style["position"]:
+        _set_stable_widget_value("subtitle_position_select", str(style["position"]))
+    if "customPosition" in style:
+        try:
+            st.session_state["custom_position_input"] = str(
+                min(100.0, max(0.0, float(style["customPosition"])))
+            )
+        except (TypeError, ValueError):
+            pass
+    if "backgroundColor" in style:
+        bg = style["backgroundColor"]
+        st.session_state["subtitle_background_enabled_checkbox"] = bool(bg)
+        if bg:
+            st.session_state["subtitle_background_color_picker"] = str(bg)
+    if "roundedBackground" in style:
+        st.session_state["rounded_subtitle_background_checkbox"] = bool(
+            style["roundedBackground"]
+        )
+
+
 def _apply_pending_task_restore():
     payload = st.session_state.pop("task_restore_payload", None)
     if not payload:
@@ -2262,6 +2316,40 @@ def _render_video_settings(panel, params):
                 if not readiness.ready:
                     st.warning(tr("Remotion Not Ready"))
                     st.caption(readiness.message)
+
+                seed_projects = remotion.list_seed_projects(limit=30)
+                seed_options = [""] + [project.path for project in seed_projects]
+                seed_labels = {
+                    "": tr("Remotion Seed None"),
+                    **{project.path: project.label for project in seed_projects},
+                }
+                selected_seed = stable_selectbox(
+                    tr("Remotion Seed Project"),
+                    options=seed_options,
+                    default_value="",
+                    key="remotion_seed_select",
+                    format_func=lambda value: seed_labels.get(value, value),
+                    help=tr("Remotion Seed Help"),
+                )
+                custom_seed = st.text_input(
+                    tr("Remotion Seed Path"),
+                    key="remotion_seed_path_input",
+                    help=tr("Remotion Seed Path Help"),
+                ).strip()
+                seed_path = custom_seed or selected_seed or ""
+                params.remotion_seed = seed_path or None
+                applied_key = "remotion_seed_applied_path"
+                if seed_path and st.session_state.get(applied_key) != seed_path:
+                    try:
+                        _apply_remotion_seed_to_ui(seed_path)
+                        st.session_state[applied_key] = seed_path
+                        st.caption(tr("Remotion Seed Applied"))
+                    except remotion.RemotionSeedError as exc:
+                        st.warning(str(exc))
+                elif not seed_path:
+                    st.session_state[applied_key] = ""
+            else:
+                params.remotion_seed = None
 
             saved_video_source_name = config.app.get("video_source", "pexels")
 

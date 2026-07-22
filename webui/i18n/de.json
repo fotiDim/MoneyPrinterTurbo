@@ -280,6 +280,12 @@
         "Video Source Settings": "**Videoquellen-Einstellungen**",
         "Coverr": "Coverr",
         "Coverr API Key": "Coverr API-Schlüssel ([API-Schlüssel holen](https://coverr.co/developers?ctx=header_navigation))",
-        "Please Enter the Coverr API Key": "Bitte geben Sie den **Coverr API-Schlüssel** ein"
+        "Please Enter the Coverr API Key": "Bitte geben Sie den **Coverr API-Schlüssel** ein",
+        "Remotion Seed Project": "Style Seed (past Remotion project)",
+        "Remotion Seed None": "Default template (no seed)",
+        "Remotion Seed Help": "Reuse composition effects, transitions, subtitle look, and BGM from a past remotion-* project. New script, voiceover, and product clips are still generated.",
+        "Remotion Seed Path": "Or seed project path",
+        "Remotion Seed Path Help": "Optional absolute/relative path to a remotion-* folder. Overrides the dropdown when set.",
+        "Remotion Seed Applied": "Seed style applied to transition, subtitles, and BGM. Edit any field to override."
     }
 }

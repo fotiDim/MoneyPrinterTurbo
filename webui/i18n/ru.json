@@ -280,6 +280,12 @@
         "Custom Position (% from top)": "Пользовательское положение (% от верхнего края)",
         "Please enter a value between 0 and 100": "Введите значение от 0 до 100",
         "Please enter a valid number": "Введите корректное число",
-        "Please Select a Valid Video Source": "Выберите поддерживаемый источник материалов"
+        "Please Select a Valid Video Source": "Выберите поддерживаемый источник материалов",
+        "Remotion Seed Project": "Style Seed (past Remotion project)",
+        "Remotion Seed None": "Default template (no seed)",
+        "Remotion Seed Help": "Reuse composition effects, transitions, subtitle look, and BGM from a past remotion-* project. New script, voiceover, and product clips are still generated.",
+        "Remotion Seed Path": "Or seed project path",
+        "Remotion Seed Path Help": "Optional absolute/relative path to a remotion-* folder. Overrides the dropdown when set.",
+        "Remotion Seed Applied": "Seed style applied to transition, subtitles, and BGM. Edit any field to override."
     }
 }

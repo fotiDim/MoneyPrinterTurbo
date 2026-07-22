@@ -243,7 +243,7 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 2. 执行 `cd remotion && npm install`
 3. 在 `config.toml` 中设置 `video_renderer = "remotion"`，或在 WebUI 视频设置中选择 **Remotion**
 
-每次 Remotion 成片还会在 `storage/tasks/<task_id>/remotion-<index>/` 生成可独立编辑的项目（可用 `npx remotion studio` 打开）。
+每次 Remotion 成片还会在 `storage/tasks/<task_id>/remotion-<标题slug>-<task8>-<index>/` 生成可独立编辑的项目（可用 `npx remotion studio` 打开；目录名含任务标题与短 task id，便于区分）。新产品视频若要沿用同一视觉风格，可在 WebUI 选择该项目作为**风格种子**，或在 CLI 使用 `--remotion-seed <path>`（复用成片代码、转场、字幕样式与 BGM；文案/配音/素材仍重新生成）。
 
 详见 [`remotion/README.md`](remotion/README.md)。公司使用 Remotion 可能需要付费许可证：https://www.remotion.dev/docs/license
 

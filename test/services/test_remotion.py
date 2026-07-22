@@ -120,12 +120,38 @@ class RemotionServiceTests(unittest.TestCase):
         self.assertEqual(clips[0]["durationInFrames"], 90)
         self.assertEqual(clips[0]["startFromSeconds"], 0.0)
 
+    def test_project_folder_name_includes_title_and_task_id(self):
+        name = remotion.project_folder_name(
+            "85fab526-8060-400e-99fd-e4196e3dc438",
+            1,
+            title="How AI is changing everyday life.",
+        )
+        self.assertEqual(
+            name,
+            "remotion-how-ai-is-changing-everyday-life-85fab526-1",
+        )
+        self.assertEqual(
+            remotion.npm_package_name(
+                "85fab526-8060-400e-99fd-e4196e3dc438",
+                1,
+                title="How AI is changing everyday life.",
+            ),
+            name,
+        )
+        self.assertEqual(
+            remotion.project_folder_name("abc", 2, title=""),
+            "remotion-abc-2",
+        )
+
     def test_scaffold_project_copies_src_and_symlinks_node_modules(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             template = Path(tmp_dir) / "remotion"
             (template / "src").mkdir(parents=True)
             (template / "src" / "index.ts").write_text("export {}", encoding="utf-8")
-            (template / "package.json").write_text("{}", encoding="utf-8")
+            (template / "package.json").write_text(
+                json.dumps({"name": "moneyprinterturbo-remotion", "version": "1.0.0"}),
+                encoding="utf-8",
+            )
             (template / "remotion.config.ts").write_text("// cfg", encoding="utf-8")
             (template / "tsconfig.json").write_text("{}", encoding="utf-8")
             (template / "node_modules" / "remotion").mkdir(parents=True)
@@ -140,11 +166,17 @@ class RemotionServiceTests(unittest.TestCase):
                     remotion.utils, "task_dir", return_value=str(task_root)
                 ),
             ):
-                project_path = remotion.scaffold_project("task-1", 1)
+                project_path = remotion.scaffold_project(
+                    "abcd1234-xxxx", 1, title="Demo Product"
+                )
 
             project = Path(project_path)
+            self.assertTrue(project.name.startswith("remotion-demo-product-abcd1234-1"))
             self.assertTrue((project / "src" / "index.ts").is_file())
             self.assertTrue((project / "package.json").is_file())
+            package = json.loads((project / "package.json").read_text(encoding="utf-8"))
+            self.assertEqual(package["name"], "remotion-demo-product-abcd1234-1")
+            self.assertIn("Demo Product", package.get("description", ""))
             self.assertTrue((project / "README.md").is_file())
             self.assertTrue((project / "public").is_dir())
             self.assertTrue((project / "node_modules").is_symlink())
@@ -152,6 +184,147 @@ class RemotionServiceTests(unittest.TestCase):
                 os.path.realpath(project / "node_modules"),
                 os.path.realpath(template / "node_modules"),
             )
+
+    def test_scaffold_project_uses_seed_src(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            template = Path(tmp_dir) / "remotion"
+            (template / "src").mkdir(parents=True)
+            (template / "src" / "index.ts").write_text("template", encoding="utf-8")
+            (template / "package.json").write_text("{}", encoding="utf-8")
+            (template / "node_modules" / "remotion").mkdir(parents=True)
+
+            seed = Path(tmp_dir) / "seed"
+            (seed / "src").mkdir(parents=True)
+            (seed / "src" / "index.ts").write_text("from-seed", encoding="utf-8")
+            (seed / "public").mkdir(parents=True)
+
+            task_root = Path(tmp_dir) / "tasks" / "task-seed"
+            task_root.mkdir(parents=True)
+
+            with (
+                patch.object(remotion, "ensure_ready"),
+                patch.object(remotion, "template_dir", return_value=str(template)),
+                patch.object(
+                    remotion.utils, "task_dir", return_value=str(task_root)
+                ),
+            ):
+                project_path = remotion.scaffold_project(
+                    "task-seed", 1, seed_path=str(seed)
+                )
+
+            self.assertEqual(
+                (Path(project_path) / "src" / "index.ts").read_text(encoding="utf-8"),
+                "from-seed",
+            )
+
+    def test_validate_seed_project_requires_src(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bad = Path(tmp_dir) / "bad"
+            bad.mkdir()
+            with self.assertRaises(remotion.RemotionSeedError):
+                remotion.validate_seed_project(str(bad))
+
+    def test_list_seed_projects_discovers_remotion_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tasks = Path(tmp_dir) / "tasks"
+            project = tasks / "abc" / "remotion-1"
+            (project / "src").mkdir(parents=True)
+            (project / "src" / "Root.tsx").write_text("x", encoding="utf-8")
+            with patch.object(
+                remotion.utils, "storage_dir", return_value=str(tasks)
+            ):
+                found = remotion.list_seed_projects(limit=10)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0].task_id, "abc")
+            self.assertTrue(found[0].path.endswith("remotion-1"))
+
+    def test_dominant_transition_and_seed_package(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            seed = Path(tmp_dir) / "remotion-1"
+            (seed / "src").mkdir(parents=True)
+            (seed / "public").mkdir(parents=True)
+            bgm = seed / "public" / "bgm-1.mp3"
+            font = seed / "public" / "font-1.ttc"
+            bgm.write_bytes(b"bgm")
+            font.write_bytes(b"font")
+            props = {
+                "clips": [
+                    {"transition": "FadeIn"},
+                    {"transition": "FadeIn"},
+                    {"transition": "SlideIn"},
+                ],
+                "transitionDurationInFrames": 45,
+                "bgmSrc": "bgm-1.mp3",
+                "bgmVolume": 0.35,
+                "voiceVolume": 0.9,
+                "subtitles": {
+                    "fontPath": "font-1.ttc",
+                    "fontSize": 72,
+                    "color": "#FF0000",
+                    "cues": [{"text": "old"}],
+                },
+            }
+            (seed / "input-props.json").write_text(
+                json.dumps(props), encoding="utf-8"
+            )
+            package = remotion.load_seed_package(str(seed))
+            self.assertEqual(package.dominant_transition, "FadeIn")
+            self.assertEqual(package.transition_duration_in_frames, 45)
+            self.assertTrue(os.path.samefile(package.bgm_path, bgm))
+            self.assertTrue(os.path.samefile(package.font_path, font))
+            self.assertEqual(package.subtitle_style["fontSize"], 72)
+
+            built = {
+                "clips": [{"src": "/new.mp4", "transition": "none"}],
+                "narrationSrc": "/new-voice.mp3",
+                "bgmSrc": str(bgm),
+                "bgmVolume": 0.2,
+                "transitionDurationInFrames": 30,
+                "subtitles": {
+                    "enabled": True,
+                    "cues": [{"text": "new"}],
+                    "fontPath": "/other.ttc",
+                    "fontSize": 60,
+                },
+            }
+            updated = remotion.apply_seed_package_to_props(built, package)
+            self.assertEqual(updated["transitionDurationInFrames"], 45)
+            self.assertEqual(updated["bgmVolume"], 0.35)
+            self.assertTrue(os.path.samefile(updated["subtitles"]["fontPath"], font))
+            self.assertEqual(updated["subtitles"]["cues"][0]["text"], "new")
+            self.assertEqual(updated["narrationSrc"], "/new-voice.mp3")
+            self.assertEqual(updated["clips"][0]["src"], "/new.mp4")
+
+    def test_merge_seed_defaults_sets_transition_and_custom_bgm(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            seed = Path(tmp_dir) / "remotion-1"
+            (seed / "src").mkdir(parents=True)
+            (seed / "public").mkdir(parents=True)
+            bgm = seed / "public" / "bed.mp3"
+            bgm.write_bytes(b"x")
+            (seed / "input-props.json").write_text(
+                json.dumps(
+                    {
+                        "clips": [{"transition": "ZoomIn"}],
+                        "bgmSrc": "bed.mp3",
+                        "bgmVolume": 0.4,
+                        "subtitles": {"fontSize": 80, "color": "#00FF00"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            params = VideoParams(
+                video_subject="demo",
+                remotion_seed=str(seed),
+                bgm_type="random",
+                video_transition_mode=VideoTransitionMode.none,
+            )
+            merged = remotion.merge_seed_defaults_into_params(params)
+            self.assertEqual(merged.video_transition_mode, VideoTransitionMode.zoom_in)
+            self.assertEqual(merged.bgm_type, "custom")
+            self.assertTrue(os.path.samefile(merged.bgm_file, bgm))
+            self.assertEqual(merged.font_size, 80)
+            self.assertEqual(merged.text_fore_color, "#00FF00")
 
     def test_stage_props_into_project_uses_simple_public_names(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
