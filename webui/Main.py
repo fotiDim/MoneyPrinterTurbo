@@ -35,6 +35,8 @@ from app.models.llm_provider import (
 from app.models.schema import (
     MaterialInfo,
     VideoAspect,
+    VideoAsset,
+    VideoAssetRole,
     VideoConcatMode,
     VideoParams,
     VideoTransitionMode,
@@ -324,6 +326,13 @@ def _build_restore_upload_requirements(params: Mapping) -> dict:
     """
     return {
         "local_materials": params.get("video_source") == "local",
+        "brand_assets": bool(
+            params.get("video_assets")
+            or (
+                params.get("video_source") != "local"
+                and params.get("video_materials")
+            )
+        ),
         "custom_audio": bool(params.get("custom_audio_file")),
         "original_voice_name": params.get("voice_name") or "",
     }
@@ -347,6 +356,11 @@ def _get_unmet_restore_upload_requirements(
         and video_source == "local"
         and not has_local_materials
     ):
+        unmet.add("local_materials")
+
+    # Online tasks that used brand/local assets need a re-upload after restore,
+    # unless the user no longer provides (or needs) those files.
+    if requirements.get("brand_assets") and not has_local_materials:
         unmet.add("local_materials")
 
     if requirements.get("custom_audio") and not has_custom_audio:
@@ -2251,19 +2265,119 @@ def _render_video_settings(panel, params):
             )
             config.app["video_source"] = params.video_source
 
-            if params.video_source == "local":
-                # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
-                local_file_types = sorted(
-                    extension.removeprefix(".")
-                    for extension in LOCAL_MATERIAL_EXTENSIONS
+            st.markdown(f"**{tr('Brand & Local Assets')}**")
+            st.caption(tr("Brand & Local Assets Help"))
+            # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
+            local_file_types = sorted(
+                extension.removeprefix(".")
+                for extension in LOCAL_MATERIAL_EXTENSIONS
+            )
+            uploaded_files = st.file_uploader(
+                tr("Upload Local Files"),
+                type=local_file_types
+                + [file_type.upper() for file_type in local_file_types],
+                accept_multiple_files=True,
+                key="local_video_materials_uploader",
+            )
+
+            asset_role_options = [
+                (tr("Asset Role B-roll"), VideoAssetRole.broll.value),
+                (tr("Asset Role Intro"), VideoAssetRole.intro.value),
+                (tr("Asset Role Outro"), VideoAssetRole.outro.value),
+                (tr("Asset Role Overlay"), VideoAssetRole.overlay.value),
+            ]
+            role_labels = dict((v, label) for label, v in asset_role_options)
+            upload_names = [
+                getattr(file, "name", f"file-{index}")
+                for index, file in enumerate(uploaded_files or [])
+            ]
+            persisted = st.session_state.get("local_video_materials") or []
+            role_targets = upload_names or [
+                os.path.basename(item.get("url", "")) or f"asset-{index}"
+                for index, item in enumerate(persisted)
+            ]
+
+            asset_roles = []
+            has_overlay_role = False
+            for index, name in enumerate(role_targets):
+                default_role = VideoAssetRole.broll.value
+                if not upload_names and index < len(persisted):
+                    default_role = persisted[index].get(
+                        "role", VideoAssetRole.broll.value
+                    )
+                role = stable_selectbox(
+                    f"{tr('Asset Role')}: {name}",
+                    options=[value for _, value in asset_role_options],
+                    default_value=default_role,
+                    key=f"video_asset_role_{index}_{name}",
+                    format_func=lambda value: role_labels.get(value, value),
                 )
-                uploaded_files = st.file_uploader(
-                    tr("Upload Local Files"),
-                    type=local_file_types
-                    + [file_type.upper() for file_type in local_file_types],
-                    accept_multiple_files=True,
-                    key="local_video_materials_uploader",
+                asset_roles.append(role)
+                if role == VideoAssetRole.overlay.value:
+                    has_overlay_role = True
+
+            st.session_state["pending_video_asset_roles"] = asset_roles
+
+            if has_overlay_role:
+                overlay_positions = [
+                    (tr("Overlay Top Left"), "top_left"),
+                    (tr("Overlay Top Right"), "top_right"),
+                    (tr("Overlay Bottom Left"), "bottom_left"),
+                    (tr("Overlay Bottom Right"), "bottom_right"),
+                    (tr("Overlay Center"), "center"),
+                ]
+                params_overlay_position = stable_selectbox(
+                    tr("Logo Overlay Position"),
+                    options=[value for _, value in overlay_positions],
+                    default_value="top_right",
+                    key="video_overlay_position",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in overlay_positions
+                    )[value],
                 )
+                st.session_state["pending_overlay_position"] = params_overlay_position
+                st.session_state["pending_overlay_scale"] = st.slider(
+                    tr("Logo Overlay Scale"),
+                    min_value=0.05,
+                    max_value=0.5,
+                    value=float(st.session_state.get("pending_overlay_scale", 0.15)),
+                    step=0.01,
+                    key="video_overlay_scale",
+                )
+                st.session_state["pending_overlay_opacity"] = st.slider(
+                    tr("Logo Overlay Opacity"),
+                    min_value=0.1,
+                    max_value=1.0,
+                    value=float(st.session_state.get("pending_overlay_opacity", 1.0)),
+                    step=0.05,
+                    key="video_overlay_opacity",
+                )
+
+            if params.video_source != "local" and (
+                any(role == VideoAssetRole.broll.value for role in asset_roles)
+                or (
+                    not role_targets
+                    and any(
+                        item.get("role", "broll") == "broll" for item in persisted
+                    )
+                )
+            ):
+                broll_modes = [
+                    (tr("Local B-roll Prepend"), "prepend"),
+                    (tr("Local B-roll Append"), "append"),
+                    (tr("Local B-roll Interleave"), "interleave"),
+                ]
+                params.local_broll_mode = stable_selectbox(
+                    tr("Local B-roll Mix Mode"),
+                    options=[value for _, value in broll_modes],
+                    default_value="prepend",
+                    key="local_broll_mode_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in broll_modes
+                    )[value],
+                )
+            else:
+                params.local_broll_mode = "prepend"
 
             # 文案顺序匹配会从关键词生成到最终合成全程保持叙事顺序，因此开启时
             # 顺序拼接是唯一符合实际执行逻辑的选项。同步控件值可避免界面仍显示
@@ -3875,8 +3989,17 @@ def _render_generation_controls(
             local_videos_dir = utils.storage_dir("local_videos", create=True)
             # 每次重新上传时都以本次选择的素材为准，避免旧素材不断重复追加。
             params.video_materials = []
+            params.video_assets = []
             persisted_local_materials = []
-            for file in uploaded_files:
+            roles = st.session_state.get("pending_video_asset_roles") or []
+            overlay_position = st.session_state.get(
+                "pending_overlay_position", "top_right"
+            )
+            overlay_scale = float(st.session_state.get("pending_overlay_scale", 0.15))
+            overlay_opacity = float(
+                st.session_state.get("pending_overlay_opacity", 1.0)
+            )
+            for index, file in enumerate(uploaded_files):
                 try:
                     file_path = _build_uploaded_file_path(
                         file,
@@ -3890,31 +4013,99 @@ def _render_generation_controls(
                     st.stop()
                 with open(file_path, "wb") as f:
                     f.write(file.getbuffer())
+                role = (
+                    roles[index]
+                    if index < len(roles)
+                    else VideoAssetRole.broll.value
+                )
+                asset_kwargs = {
+                    "role": role,
+                    "provider": "local",
+                    "url": file_path,
+                }
+                if role == VideoAssetRole.overlay.value:
+                    asset_kwargs.update(
+                        {
+                            "position": overlay_position,
+                            "scale": overlay_scale,
+                            "opacity": overlay_opacity,
+                        }
+                    )
+                asset = VideoAsset(**asset_kwargs)
+                params.video_assets.append(asset)
+                if role == VideoAssetRole.broll.value:
                     m = MaterialInfo()
                     m.provider = "local"
                     m.url = file_path
                     params.video_materials.append(m)
-                    persisted_local_materials.append(
-                        {
-                            "provider": m.provider,
-                            "url": m.url,
-                            "duration": m.duration,
-                        }
-                    )
+                persisted_local_materials.append(
+                    {
+                        "provider": "local",
+                        "url": file_path,
+                        "duration": 0,
+                        "role": role,
+                        "position": asset.position,
+                        "scale": asset.scale,
+                        "opacity": asset.opacity,
+                        "margin": asset.margin,
+                    }
+                )
             # 将已上传并保存到本地的视频素材写入会话，供后续只改文案时直接复用。
             st.session_state["local_video_materials"] = persisted_local_materials
-        elif (
-            params.video_source == "local" and st.session_state["local_video_materials"]
-        ):
+        elif st.session_state.get("local_video_materials"):
             # 当用户没有重新上传文件时，复用最近一次已经保存到磁盘的本地素材列表。
             params.video_materials = []
-            for material in st.session_state["local_video_materials"]:
-                m = MaterialInfo()
-                m.provider = material.get("provider", "local")
-                m.url = material.get("url", "")
-                m.duration = material.get("duration", 0)
-                if m.url:
+            params.video_assets = []
+            roles = st.session_state.get("pending_video_asset_roles") or []
+            overlay_position = st.session_state.get(
+                "pending_overlay_position", "top_right"
+            )
+            overlay_scale = float(st.session_state.get("pending_overlay_scale", 0.15))
+            overlay_opacity = float(
+                st.session_state.get("pending_overlay_opacity", 1.0)
+            )
+            for index, material in enumerate(st.session_state["local_video_materials"]):
+                url = material.get("url", "")
+                if not url:
+                    continue
+                role = (
+                    roles[index]
+                    if index < len(roles)
+                    else material.get("role", VideoAssetRole.broll.value)
+                )
+                asset_kwargs = {
+                    "role": role,
+                    "provider": material.get("provider", "local"),
+                    "url": url,
+                }
+                if role == VideoAssetRole.overlay.value:
+                    asset_kwargs.update(
+                        {
+                            "position": material.get("position", overlay_position),
+                            "scale": material.get("scale", overlay_scale),
+                            "opacity": material.get("opacity", overlay_opacity),
+                            "margin": material.get("margin", 24),
+                        }
+                    )
+                asset = VideoAsset(**asset_kwargs)
+                params.video_assets.append(asset)
+                if role == VideoAssetRole.broll.value:
+                    m = MaterialInfo()
+                    m.provider = asset.provider
+                    m.url = url
+                    m.duration = material.get("duration", 0)
                     params.video_materials.append(m)
+
+        # Local-only source still requires at least one B-roll asset.
+        if params.video_source == "local":
+            has_broll = any(
+                asset.role == VideoAssetRole.broll
+                for asset in (params.video_assets or [])
+            ) or bool(params.video_materials)
+            if not has_broll:
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Upload Local Materials First"))
+                st.stop()
 
         reusable_voice_preview = _get_reusable_full_voice_preview(
             params,

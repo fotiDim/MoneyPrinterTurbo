@@ -128,6 +128,7 @@
 - [x] 支持 **字幕生成**，可调整字体、位置、颜色、大小、描边和背景样式
 - [x] 支持 **背景音乐**，可随机选择或使用指定音乐，并调整音量
 - [x] 支持使用自己的 **本地素材**，也可从 **Pexels**、**Pixabay** 和 **Coverr** 获取可免费使用的高清素材
+- [x] 支持将 **本地素材与在线素材混合**：可为成片添加 **片头 / 片尾**、**Logo 水印**，或把本地 B-roll 与库存素材交错拼接
 - [x] 支持 **Kimi / Moonshot AI**、**OpenAI**、**Google Gemini**、**DeepSeek**、**阿里云通义千问**、**Microsoft Azure OpenAI**、**火山引擎方舟**、**xAI Grok**、**MiniMax**、**小米 MiMo** 等主流模型服务，并兼容 **Cloudflare AI Gateway**、**魔搭 ModelScope**、**AIHubMix**、**AIML API**、**EvoLink**、**Ollama**、**OneAPI**、**LiteLLM**、**Groq**、**Pollinations AI** 等统一网关、聚合平台和本地运行环境
 - [x] 支持一键 **跨平台发布**，生成完成后可自动上传至 **TikTok**、**Instagram** 和 **YouTube Shorts**
 
@@ -343,6 +344,13 @@ python main.py
 uv run python cli.py --video-subject "人工智能如何改变日常生活"
 ```
 
+混合本地品牌素材与在线库存素材（片头、Logo、片尾）的示例：
+
+```shell
+uv run python cli.py --video-subject "产品发布" --video-source pexels \
+  --video-assets '[{"role":"intro","url":"./intro.mp4"},{"role":"overlay","url":"./logo.png","position":"top_right","scale":0.12},{"role":"outro","url":"./outro.mp4"}]'
+```
+
 如需查看完整命令、参数说明和使用方法，可以执行：
 
 ```shell
@@ -392,6 +400,19 @@ MoneyPrinterTurbo
 用于视频的背景音乐，位于项目的 `resource/songs` 目录下。
 
 > 当前项目里面放了一些默认的音乐，来自于 YouTube 视频，如有侵权，请删除。
+
+## 品牌与本地素材 🎞️
+
+本地文件不再只能替代在线素材，也可以与 **Pexels / Pixabay / Coverr** 一起使用。在 WebUI 的 **视频设置 → 品牌与本地素材** 中上传文件，并为每个文件选择角色：
+
+| 角色 | 作用 |
+|------|------|
+| **B-roll** | 与在线库存素材混合进主时间线（可前置 / 后置 / 交错） |
+| **片头 Intro** | 插在旁白开始之前的完整片段 |
+| **片尾 Outro** | 接在主内容之后的完整片段 |
+| **Logo 水印 Overlay** | 叠在主内容画面上（可调位置、缩放、透明度） |
+
+API 与 CLI 通过 `video_assets` 传入相同结构；仅本地成片时仍可使用 `--video-source local` 与 `--video-materials`。上传文件保存在 `storage/local_videos`。
 
 ## 字幕字体 🅰
 

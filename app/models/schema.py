@@ -57,6 +57,31 @@ class MaterialInfo:
     duration: int = 0
 
 
+class VideoAssetRole(str, Enum):
+    broll = "broll"
+    intro = "intro"
+    outro = "outro"
+    overlay = "overlay"
+
+
+class VideoAsset(BaseModel):
+    """Local or remote supplemental asset mixed with online stock footage."""
+
+    role: VideoAssetRole = VideoAssetRole.broll
+    provider: str = "local"  # local (sandboxed) | url (http download)
+    url: str = ""  # filename under local_videos, or http(s) URL
+    # overlay placement (ignored for other roles)
+    position: Literal[
+        "top_left", "top_right", "bottom_left", "bottom_right", "center"
+    ] = "top_right"
+    scale: float = Field(default=0.15, gt=0.0, le=1.0)
+    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    margin: int = Field(default=24, ge=0)
+    # optional overlay timing relative to the main (narrated) segment
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+
+
 class VideoParams(BaseModel):
     """
     {
@@ -85,8 +110,10 @@ class VideoParams(BaseModel):
 
     video_source: Optional[str] = "pexels"
     video_materials: Optional[List[MaterialInfo]] = (
-        None  # Materials used to generate the video
+        None  # Legacy B-roll materials; prefer video_assets
     )
+    video_assets: Optional[List[VideoAsset]] = None
+    local_broll_mode: Literal["prepend", "append", "interleave"] = "prepend"
     
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore TTS and can still use Whisper subtitles
     video_language: Optional[str] = ""  # auto detect

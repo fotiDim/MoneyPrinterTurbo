@@ -123,10 +123,41 @@ The helper may read the complete local `config.toml` to reuse existing settings,
 
 Use background mode only if the agent platform cannot wait for a foreground process. Wait for the platform's process-completion notification without polling, then read `latest-result.json` once.
 
+## Local and Brand Assets
+
+When the user provides their own files (logo, intro, outro, extra B-roll), forward them after `--`. Prefer absolute paths so the helper working directory does not matter. The CLI copies local files into `storage/local_videos`.
+
+Roles for `--video-assets` JSON: `broll`, `intro`, `outro`, `overlay`.
+
+Mix brand assets with the default Pexels stock:
+
+```bash
+uv run --no-project --python 3.11 python mpt_agent.py --subject "<video topic>" -- \
+  --video-assets '[{"role":"intro","url":"/absolute/path/intro.mp4"},{"role":"overlay","url":"/absolute/path/logo.png","position":"top_right","scale":0.12},{"role":"outro","url":"/absolute/path/outro.mp4"}]'
+```
+
+Attach local B-roll alongside online stock:
+
+```bash
+uv run --no-project --python 3.11 python mpt_agent.py --subject "<video topic>" -- \
+  --video-materials "/absolute/path/a.mp4,/absolute/path/b.mp4" \
+  --local-broll-mode prepend
+```
+
+All-local footage (skips stock API keys):
+
+```bash
+uv run --no-project --python 3.11 python mpt_agent.py --subject "<video topic>" -- \
+  --video-source local \
+  --video-materials "/absolute/path/a.mp4,/absolute/path/b.mp4"
+```
+
+If the user asks for a logo, intro, or ending sequence, use `--video-assets` rather than switching to `--video-source local` unless they want an all-local video.
+
 ## Scope
 
 - Support macOS and Windows only.
 - Use uv and the MoneyPrinterTurbo CLI only.
 - Do not start Docker, WebUI, or API services.
 - Do not run multiple video jobs concurrently.
-- Pass additional video requirements after `--`. Run `cli.py --help` once only when an unfamiliar option must be verified.
+- Pass additional video requirements after `--`, including `--video-assets`, `--video-materials`, and `--local-broll-mode` when the user supplies their own files. Run `cli.py --help` once only when an unfamiliar option must be verified.
