@@ -12,7 +12,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.services import task as tm
-from app.models.schema import MaterialInfo, VideoParams
+from app.models.schema import MaterialInfo, VideoAsset, VideoAssetRole, VideoParams
 from app.services.state import MemoryState, RedisState
 from app.utils import utils
 
@@ -33,6 +33,73 @@ class TestTaskService(unittest.TestCase):
     def tearDown(self):
         with tm._cross_post_registry_lock:
             tm._cross_post_futures.clear()
+
+    def test_collect_video_assets_maps_legacy_materials_to_broll(self):
+        params = VideoParams(
+            video_subject="demo",
+            video_materials=[
+                MaterialInfo(provider="local", url="clip.mp4", duration=0)
+            ],
+        )
+        assets = tm.collect_video_assets(params)
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0].role, VideoAssetRole.broll)
+        self.assertEqual(assets[0].url, "clip.mp4")
+
+    def test_collect_video_assets_prefers_video_assets(self):
+        params = VideoParams(
+            video_subject="demo",
+            video_materials=[
+                MaterialInfo(provider="local", url="legacy.mp4", duration=0)
+            ],
+            video_assets=[
+                VideoAsset(role=VideoAssetRole.intro, url="intro.mp4"),
+            ],
+        )
+        assets = tm.collect_video_assets(params)
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0].role, VideoAssetRole.intro)
+
+    def test_merge_broll_paths_modes(self):
+        self.assertEqual(
+            tm.merge_broll_paths(["l1"], ["s1", "s2"], "prepend"),
+            ["l1", "s1", "s2"],
+        )
+        self.assertEqual(
+            tm.merge_broll_paths(["l1"], ["s1", "s2"], "append"),
+            ["s1", "s2", "l1"],
+        )
+        self.assertEqual(
+            tm.merge_broll_paths(["l1", "l2"], ["s1"], "interleave"),
+            ["l1", "s1", "l2"],
+        )
+
+    def test_get_video_materials_merges_local_broll_with_stock(self):
+        params = VideoParams(
+            video_subject="demo",
+            video_source="pexels",
+            local_broll_mode="prepend",
+            video_assets=[
+                VideoAsset(role=VideoAssetRole.broll, url="local.mp4"),
+                VideoAsset(role=VideoAssetRole.intro, url="intro.mp4"),
+            ],
+        )
+        with (
+            patch.object(
+                tm.video,
+                "preprocess_video",
+                return_value=[
+                    MaterialInfo(provider="local", url="/resolved/local.mp4", duration=0)
+                ],
+            ),
+            patch.object(
+                tm.material, "download_videos", return_value=["/stock/a.mp4"]
+            ) as download,
+        ):
+            paths = tm.get_video_materials("task-1", params, ["term"], 10.0)
+
+        self.assertEqual(paths, ["/resolved/local.mp4", "/stock/a.mp4"])
+        download.assert_called_once()
 
     def test_is_task_busy_covers_generation_and_cross_posting(self):
         """删除入口必须同时识别视频生成和跨平台发布的活跃状态。"""

@@ -129,6 +129,7 @@ Thanks to [Kimi](https://platform.kimi.ai?aff=MoneyPrinterTurbo) for sponsoring 
 - [x] Supports **subtitle generation** with configurable fonts, position, color, size, outline, and background styles
 - [x] Supports random or custom **background music** with adjustable volume
 - [x] Supports your own **local assets** and free-to-use HD footage from **Pexels**, **Pixabay**, and **Coverr**
+- [x] Supports **mixing local assets with online stock**: add an **intro / outro**, a **logo overlay**, or interleave local B-roll with downloaded clips
 - [x] Supports leading model providers including **Kimi / Moonshot AI**, **OpenAI**, **Google Gemini**, **DeepSeek**, **Alibaba Cloud Qwen**, **Microsoft Azure OpenAI**, **ByteDance VolcEngine Ark**, **xAI Grok**, **MiniMax**, and **Xiaomi MiMo**, plus unified gateways, aggregators, and local runtimes such as **Cloudflare AI Gateway**, **Alibaba ModelScope**, **AIHubMix**, **AIML API**, **EvoLink**, **Ollama**, **OneAPI**, **LiteLLM**, **Groq**, and **Pollinations AI**
 - [x] Supports one-click **cross-platform publishing** to **TikTok**, **Instagram**, and **YouTube Shorts** after video generation
 
@@ -343,6 +344,13 @@ command line. The simplest complete generation command is:
 uv run python cli.py --video-subject "How AI is changing everyday life"
 ```
 
+Mix brand assets with online stock (intro, logo overlay, outro):
+
+```shell
+uv run python cli.py --video-subject "Product launch" --video-source pexels \
+  --video-assets '[{"role":"intro","url":"./intro.mp4"},{"role":"overlay","url":"./logo.png","position":"top_right","scale":0.12},{"role":"outro","url":"./outro.mp4"}]'
+```
+
 For the complete command reference, parameter descriptions, and usage instructions,
 run:
 
@@ -394,6 +402,19 @@ Background music for videos is located in the project's `resource/songs` directo
 
 > The current project includes some default music from YouTube videos. If there are copyright issues, please delete
 > them.
+
+## Brand & Local Assets 🎞️
+
+Local files are no longer limited to replacing online footage — they can be mixed with **Pexels / Pixabay / Coverr**. In the WebUI, open **Video Settings → Brand & Local Assets**, upload files, and assign a role to each:
+
+| Role | Behavior |
+|------|----------|
+| **B-roll** | Mixed into the main timeline with stock clips (prepend / append / interleave) |
+| **Intro** | Full clip(s) played before narration starts |
+| **Outro** | Full clip(s) appended after the main content |
+| **Logo overlay** | Composited on the main segment (position, scale, opacity) |
+
+The API and CLI accept the same structure via `video_assets`. For all-local videos, continue using `--video-source local` with `--video-materials`. Uploaded files are stored under `storage/local_videos`.
 
 ## Subtitle Fonts 🅰
 

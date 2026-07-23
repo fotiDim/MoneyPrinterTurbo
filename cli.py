@@ -144,6 +144,10 @@ Examples:
     uv run python cli.py --video-subject "How AI is changing everyday life" \\
       --video-source local --video-materials "./1.mp4,./2.mp4"
 
+  Mix a local logo overlay with Pexels stock:
+    uv run python cli.py --video-subject "Product launch" --video-source pexels \\
+      --video-assets '[{"role":"overlay","url":"./logo.png","position":"top_right","scale":0.12}]'
+
   Generate with a prepared script and no voiceover:
     uv run python cli.py --video-script "Your complete script" \\
       --voice-name no-voice --stop-at video
@@ -220,9 +224,30 @@ Output and exit status:
         default="",
         metavar="PATH[,PATH...]",
         help=(
-            "comma-separated local image/video paths for --video-source local; relative "
-            "paths use the current working directory, then storage/local_videos as a "
-            "compatibility fallback; absolute paths are accepted"
+            "comma-separated local image/video paths used as B-roll; works with online "
+            "sources and --video-source local; relative paths use the current working "
+            "directory, then storage/local_videos as a compatibility fallback; absolute "
+            "paths are accepted"
+        ),
+    )
+    material_group.add_argument(
+        "--video-assets",
+        default="",
+        metavar="JSON",
+        help=(
+            "JSON list of role-based assets, e.g. "
+            '\'[{"role":"intro","url":"./intro.mp4"},'
+            '{"role":"overlay","url":"./logo.png","position":"top_right","scale":0.15}]\'; '
+            "roles: broll, intro, outro, overlay"
+        ),
+    )
+    material_group.add_argument(
+        "--local-broll-mode",
+        choices=["prepend", "append", "interleave"],
+        default=None,
+        help=(
+            "how local B-roll mixes with online stock when both are present "
+            "(default: prepend)"
         ),
     )
     material_group.add_argument(
@@ -459,13 +484,17 @@ Output and exit status:
 
     stage_requires_materials = args.stop_at in {"materials", "video"}
     has_video_materials = bool((args.video_materials or "").strip())
-    if args.video_source == "local" and stage_requires_materials and not has_video_materials:
+    has_video_assets = bool((args.video_assets or "").strip())
+    if (
+        args.video_source == "local"
+        and stage_requires_materials
+        and not has_video_materials
+        and not has_video_assets
+    ):
         parser.error(
-            "--video-materials is required with --video-source local when "
-            "--stop-at is materials or video"
+            "--video-materials or --video-assets is required with --video-source local "
+            "when --stop-at is materials or video"
         )
-    if args.video_source != "local" and has_video_materials:
-        parser.error("--video-materials can only be used with --video-source local")
 
     if args.bgm_file:
         if args.bgm_type in (None, "custom"):
@@ -500,7 +529,7 @@ Output and exit status:
 def build_video_params(args: argparse.Namespace) -> VideoParams:
     # 参数帮助和校验不需要加载应用配置。仅在真正构建任务参数时导入模型，
     # 避免执行 ``cli.py -h`` 时产生配置初始化日志。
-    from app.models.schema import MaterialInfo, VideoParams
+    from app.models.schema import MaterialInfo, VideoAsset, VideoParams
 
     video_terms = args.video_terms
     if video_terms:
@@ -518,12 +547,24 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
             if item.strip()
         ]
 
+    video_assets = None
+    assets_arg = (args.video_assets or "").strip()
+    if assets_arg:
+        try:
+            parsed_assets = json.loads(assets_arg)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"--video-assets must be valid JSON: {exc}") from exc
+        if not isinstance(parsed_assets, list):
+            raise ValueError("--video-assets must be a JSON list")
+        video_assets = [VideoAsset.model_validate(item) for item in parsed_assets]
+
     params_kwargs = {
         "video_subject": args.video_subject.strip(),
         "video_script": args.video_script,
         "video_terms": video_terms,
         "video_source": args.video_source,
         "video_materials": video_materials,
+        "video_assets": video_assets,
         "video_count": args.video_count,
         "video_aspect": args.video_aspect,
         "voice_name": args.voice_name,
@@ -539,6 +580,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_transition_mode",
         "video_clip_duration",
         "match_materials_to_script",
+        "local_broll_mode",
         "n_threads",
         "voice_volume",
         "voice_rate",
@@ -557,7 +599,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "rounded_subtitle_background",
     ]
     for name in optional_arg_names:
-        value = getattr(args, name)
+        value = getattr(args, name, None)
         if value is not None:
             params_kwargs[name] = value
 
@@ -713,14 +755,30 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
         # 下游根据 resource/fonts 内的文件名拼接路径，因此仍保留纯文件名。
         params.font_name = os.path.basename(font_path)
 
-    if params.video_source != "local" or stop_at not in {"materials", "video"}:
+    if stop_at not in {"materials", "video"}:
+        return
+
+    local_items: list[tuple[object, str]] = []
+    for material in params.video_materials or []:
+        if material.url and not str(material.url).startswith(("http://", "https://")):
+            local_items.append((material, material.url))
+    for asset in params.video_assets or []:
+        provider = (asset.provider or "local").lower()
+        if (
+            asset.url
+            and provider != "url"
+            and not str(asset.url).startswith(("http://", "https://"))
+        ):
+            local_items.append((asset, asset.url))
+
+    if not local_items:
         return
 
     local_videos_dir = utils.storage_dir("local_videos", create=True)
-    resolved_materials: list[tuple[MaterialInfo, str, str]] = []
-    for material in params.video_materials or []:
+    resolved_items: list[tuple[object, str, str]] = []
+    for item, raw_url in local_items:
         source_path = _resolve_cli_file(
-            material.url,
+            raw_url,
             description="local material",
             fallback_dir=local_videos_dir,
         )
@@ -729,14 +787,14 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
             allowed = ", ".join(sorted(local_material_extensions))
             raise ValueError(
                 f"unsupported local material type {extension or '<none>'}: "
-                f"{material.url}; allowed extensions: {allowed}"
+                f"{raw_url}; allowed extensions: {allowed}"
             )
-        resolved_materials.append((material, source_path, extension))
+        resolved_items.append((item, source_path, extension))
 
     # 所有输入检查通过后再复制，避免第二个文件无效时留下第一个文件的
     # 孤儿副本。
     prepared_paths: dict[str, str] = {}
-    for material, source_path, extension in resolved_materials:
+    for item, source_path, extension in resolved_items:
         prepared_path = prepared_paths.get(source_path)
         if prepared_path is None:
             if _path_is_within_directory(source_path, local_videos_dir):
@@ -753,7 +811,7 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
                 )
             prepared_paths[source_path] = prepared_path
 
-        material.url = prepared_path
+        item.url = prepared_path
 
 
 def run_cli(argv: Sequence[str] | None = None) -> int:

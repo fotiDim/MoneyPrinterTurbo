@@ -314,20 +314,38 @@ class TestCli(unittest.TestCase):
             ])
         self.assertNotEqual(cm.exception.code, 0)
 
-    def test_video_materials_rejected_for_online_source(self):
-        with self.assertRaises(SystemExit) as cm:
-            cli.parse_args(
-                [
-                    "--video-subject",
-                    "test",
-                    "--video-source",
-                    "pexels",
-                    "--video-materials",
-                    "a.mp4",
-                ]
-            )
+    def test_video_materials_allowed_for_online_source(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "test",
+                "--video-source",
+                "pexels",
+                "--video-materials",
+                "a.mp4",
+            ]
+        )
+        self.assertEqual(args.video_source, "pexels")
+        self.assertEqual(args.video_materials, "a.mp4")
 
-        self.assertEqual(cm.exception.code, 2)
+    def test_video_assets_json_parsed_into_params(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "test",
+                "--video-source",
+                "pexels",
+                "--video-assets",
+                '[{"role":"overlay","url":"logo.png","scale":0.2}]',
+                "--local-broll-mode",
+                "append",
+            ]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(len(params.video_assets), 1)
+        self.assertEqual(params.video_assets[0].role.value, "overlay")
+        self.assertEqual(params.video_assets[0].url, "logo.png")
+        self.assertEqual(params.local_broll_mode, "append")
 
     def test_positive_volume_custom_bgm_requires_file_before_task_start(self):
         """启用自定义 BGM 时仍必须在任务启动前报告缺少文件。"""

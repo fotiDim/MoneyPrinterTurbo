@@ -13,7 +13,13 @@ from loguru import logger
 
 from app.config import config
 from app.models import const
-from app.models.schema import VideoConcatMode, VideoParams
+from app.models.schema import (
+    MaterialInfo,
+    VideoAsset,
+    VideoAssetRole,
+    VideoConcatMode,
+    VideoParams,
+)
 from app.services import bgm as bgm_service
 from app.services import (
     elevenlabs_music,
@@ -566,25 +572,187 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
-def get_video_materials(task_id, params, video_terms, audio_duration):
-    if params.video_source == "local":
-        logger.info("\n\n## preprocess local materials")
-        materials = video.preprocess_video(
-            materials=params.video_materials, clip_duration=params.video_clip_duration
-        )
-        if not materials:
-            _mark_task_failed(
-                task_id,
-                "materials",
-                "no valid local video materials were found",
+def collect_video_assets(params: VideoParams) -> list[VideoAsset]:
+    """Prefer video_assets; map legacy video_materials to broll when assets empty."""
+    if params.video_assets:
+        return list(params.video_assets)
+    if params.video_materials:
+        return [
+            VideoAsset(
+                role=VideoAssetRole.broll,
+                provider=getattr(material, "provider", None) or "local",
+                url=material.url,
             )
+            for material in params.video_materials
+            if getattr(material, "url", None)
+        ]
+    return []
+
+
+def partition_video_assets(
+    assets: list[VideoAsset],
+) -> dict[VideoAssetRole, list[VideoAsset]]:
+    buckets: dict[VideoAssetRole, list[VideoAsset]] = {
+        role: [] for role in VideoAssetRole
+    }
+    for asset in assets:
+        role = asset.role if isinstance(asset.role, VideoAssetRole) else VideoAssetRole(asset.role)
+        buckets[role].append(asset)
+    return buckets
+
+
+def merge_broll_paths(
+    local_paths: list[str],
+    stock_paths: list[str],
+    mode: str,
+) -> list[str]:
+    local_paths = list(local_paths or [])
+    stock_paths = list(stock_paths or [])
+    if mode == "append":
+        return stock_paths + local_paths
+    if mode == "interleave":
+        merged: list[str] = []
+        longest = max(len(local_paths), len(stock_paths))
+        for index in range(longest):
+            if index < len(local_paths):
+                merged.append(local_paths[index])
+            if index < len(stock_paths):
+                merged.append(stock_paths[index])
+        return merged
+    # default: prepend local B-roll before stock
+    return local_paths + stock_paths
+
+
+def _resolve_asset_source_path(asset: VideoAsset, task_id: str) -> str | None:
+    """Resolve a local or remote asset to an absolute filesystem path."""
+    if not asset.url:
+        return None
+
+    provider = (asset.provider or "local").strip().lower()
+    url = str(asset.url)
+    if provider == "url" or url.startswith(("http://", "https://")):
+        url_without_query = url.split("?", 1)[0]
+        extension = os.path.splitext(url_without_query)[1].lower() or ".mp4"
+        if extension in const.FILE_TYPE_IMAGES:
+            save_dir = utils.task_dir(task_id)
+            image_path = path.join(
+                save_dir, f"asset-{utils.md5(url_without_query)}{extension}"
+            )
+            if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+                return image_path
+            try:
+                import requests
+
+                response = requests.get(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/115.0.0.0 Safari/537.36"
+                        )
+                    },
+                    proxies=config.proxy,
+                    timeout=(60, 240),
+                )
+                response.raise_for_status()
+                with open(image_path, "wb") as handle:
+                    handle.write(response.content)
+                if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+                    return image_path
+            except Exception as exc:
+                logger.warning(f"failed to download asset image {url}: {exc}")
+                return None
             return None
-        return [material_info.url for material_info in materials]
-    else:
+        try:
+            return material.save_video(url, save_dir=utils.task_dir(task_id))
+        except Exception as exc:
+            logger.warning(f"failed to download asset url {url}: {exc}")
+            return None
+
+    local_videos_dir = utils.storage_dir("local_videos", create=True)
+    try:
+        return file_security.resolve_path_within_directory(
+            local_videos_dir, asset.url
+        )
+    except ValueError as exc:
+        logger.warning(
+            f"skip unsafe local asset: {asset.url}, error: {exc}"
+        )
+        return None
+
+
+def resolve_brand_assets(
+    params: VideoParams, task_id: str
+) -> tuple[list[str], list[str], list[VideoAsset]]:
+    """
+    Resolve intro/outro file paths and overlay assets with absolute urls.
+
+    B-roll is handled by get_video_materials(); this only prepares bookends
+    and overlays for the final composition stage.
+    """
+    buckets = partition_video_assets(collect_video_assets(params))
+    intro_paths: list[str] = []
+    outro_paths: list[str] = []
+    overlays: list[VideoAsset] = []
+
+    for asset in buckets[VideoAssetRole.intro]:
+        resolved = _resolve_asset_source_path(asset, task_id)
+        if resolved:
+            intro_paths.append(resolved)
+
+    for asset in buckets[VideoAssetRole.outro]:
+        resolved = _resolve_asset_source_path(asset, task_id)
+        if resolved:
+            outro_paths.append(resolved)
+
+    for asset in buckets[VideoAssetRole.overlay]:
+        resolved = _resolve_asset_source_path(asset, task_id)
+        if not resolved:
+            continue
+        overlays.append(asset.model_copy(update={"url": resolved}))
+
+    return intro_paths, outro_paths, overlays
+
+
+def get_video_materials(task_id, params, video_terms, audio_duration):
+    assets = collect_video_assets(params)
+    buckets = partition_video_assets(assets)
+    broll_assets = buckets[VideoAssetRole.broll]
+    local_broll_paths: list[str] = []
+
+    if broll_assets:
+        logger.info("\n\n## preprocess local b-roll materials")
+        materials = video.preprocess_video(
+            materials=[
+                MaterialInfo(
+                    provider=asset.provider or "local",
+                    url=asset.url,
+                    duration=0,
+                )
+                for asset in broll_assets
+                if (asset.provider or "local").lower() != "url"
+                and not str(asset.url).startswith(("http://", "https://"))
+            ],
+            clip_duration=params.video_clip_duration,
+        )
+        local_broll_paths = [item.url for item in materials]
+
+        # Remote b-roll URLs are downloaded then treated as ready video paths.
+        for asset in broll_assets:
+            if (asset.provider or "local").lower() == "url" or str(
+                asset.url
+            ).startswith(("http://", "https://")):
+                resolved = _resolve_asset_source_path(asset, task_id)
+                if resolved:
+                    local_broll_paths.append(resolved)
+
+    stock_paths: list[str] = []
+    if params.video_source != "local":
         logger.info(f"\n\n## downloading videos from {params.video_source}")
         # 顺序匹配模式只在用户显式开启时生效。这里强制素材下载按关键词顺序
         # 轮询，避免某个早期关键词下载太多素材，把后续脚本主题挤出最终时间线。
-        downloaded_videos = material.download_videos(
+        stock_paths = material.download_videos(
             task_id=task_id,
             search_terms=video_terms,
             source=params.video_source,
@@ -598,14 +766,34 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             max_clip_duration=params.video_clip_duration,
             match_script_order=params.match_materials_to_script,
         )
-        if not downloaded_videos:
+        if not stock_paths and not local_broll_paths:
             _mark_task_failed(
                 task_id,
                 "materials",
                 f"failed to download video materials from {params.video_source}",
             )
             return None
-        return downloaded_videos
+    elif not local_broll_paths:
+        _mark_task_failed(
+            task_id,
+            "materials",
+            "no valid local video materials were found",
+        )
+        return None
+
+    merged = merge_broll_paths(
+        local_broll_paths,
+        stock_paths,
+        getattr(params, "local_broll_mode", None) or "prepend",
+    )
+    if not merged:
+        _mark_task_failed(
+            task_id,
+            "materials",
+            "no valid video materials were found",
+        )
+        return None
+    return merged
 
 
 def _resolve_output_concat_mode(params: VideoParams) -> VideoConcatMode:
@@ -676,6 +864,7 @@ def _generate_final_videos_with_hyperframes(
     warnings = []
     video_concat_mode = _resolve_output_concat_mode(params)
     video_transition_mode = params.video_transition_mode
+    intro_paths, outro_paths, _overlays = resolve_brand_assets(params, task_id)
 
     _progress = 50
     for i in range(params.video_count):
@@ -696,6 +885,38 @@ def _generate_final_videos_with_hyperframes(
             clip_speed=params.video_clip_speed,
         )
 
+        intro_duration = 0.0
+        if intro_paths or outro_paths:
+            bookended_path = path.join(
+                utils.task_dir(task_id), f"bookended-{index}.mp4"
+            )
+            intro_duration = video.apply_bookend_clips(
+                main_video_path=combined_video_path,
+                output_path=bookended_path,
+                intro_paths=intro_paths,
+                outro_paths=outro_paths,
+                video_aspect=params.video_aspect,
+                threads=params.n_threads or 2,
+            )
+            if os.path.exists(bookended_path):
+                combined_video_path = bookended_path
+
+        # HyperFrames uses audio from t=0; pad silence so narration starts after intro.
+        hyperframes_audio = audio_file
+        hyperframes_duration = float(audio_duration or 0) or 1.0
+        if intro_duration > 0:
+            padded_audio = path.join(
+                utils.task_dir(task_id), f"padded-audio-{index}.mp3"
+            )
+            try:
+                _pad_audio_start(audio_file, padded_audio, intro_duration)
+                hyperframes_audio = padded_audio
+                hyperframes_duration = intro_duration + float(audio_duration or 0)
+            except Exception as exc:
+                logger.warning(
+                    f"failed to pad audio for hyperframes intro offset: {exc}"
+                )
+
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
 
@@ -704,7 +925,7 @@ def _generate_final_videos_with_hyperframes(
             task_id=task_id,
             index=index,
             combined_video_path=combined_video_path,
-            audio_duration=audio_duration,
+            audio_duration=hyperframes_duration,
             warnings=warnings,
         )
 
@@ -717,9 +938,9 @@ def _generate_final_videos_with_hyperframes(
             index=index,
             params=params,
             video_path=combined_video_path,
-            audio_path=audio_file,
+            audio_path=hyperframes_audio,
             subtitle_path=subtitle_path or "",
-            duration=float(audio_duration or 0) or 1.0,
+            duration=hyperframes_duration,
             bgm_path=bgm_path,
         )
         hyperframes.render_project(
@@ -743,6 +964,26 @@ def _generate_final_videos_with_hyperframes(
     )
 
 
+def _pad_audio_start(audio_path: str, output_path: str, intro_duration: float) -> None:
+    """Prepend silence so narration aligns after intro bookends (HyperFrames)."""
+    import subprocess
+
+    delay_ms = max(0, int(float(intro_duration) * 1000))
+    command = [
+        utils.get_ffmpeg_binary(),
+        "-y",
+        "-i",
+        audio_path,
+        "-af",
+        f"adelay={delay_ms}|{delay_ms}",
+        output_path,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        error_message = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(error_message or "ffmpeg audio pad failed")
+
+
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
@@ -762,6 +1003,7 @@ def generate_final_videos(
     video_music_provider = _VIDEO_MUSIC_PROVIDERS.get(params.bgm_type)
     video_concat_mode = _resolve_output_concat_mode(params)
     video_transition_mode = params.video_transition_mode
+    intro_paths, outro_paths, overlay_assets = resolve_brand_assets(params, task_id)
 
     _progress = 50
     for i in range(params.video_count):
@@ -782,11 +1024,28 @@ def generate_final_videos(
             clip_speed=params.video_clip_speed,
         )
 
+        intro_duration = 0.0
+        if intro_paths or outro_paths:
+            bookended_path = path.join(
+                utils.task_dir(task_id), f"bookended-{index}.mp4"
+            )
+            intro_duration = video.apply_bookend_clips(
+                main_video_path=combined_video_path,
+                output_path=bookended_path,
+                intro_paths=intro_paths,
+                outro_paths=outro_paths,
+                video_aspect=params.video_aspect,
+                threads=params.n_threads or 2,
+            )
+            if os.path.exists(bookended_path):
+                combined_video_path = bookended_path
+
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
 
         final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
 
+        bgm_duration = float(audio_duration or 0) + float(intro_duration or 0)
         bgm_file_override = None
         if video_music_provider is not None:
             bgm_path = _resolve_bgm_for_output(
@@ -794,7 +1053,7 @@ def generate_final_videos(
                 task_id=task_id,
                 index=index,
                 combined_video_path=combined_video_path,
-                audio_duration=audio_duration,
+                audio_duration=bgm_duration,
                 warnings=warnings,
             )
             bgm_file_override = bgm_path
@@ -807,6 +1066,9 @@ def generate_final_videos(
             output_file=final_video_path,
             params=params,
             bgm_file_override=bgm_file_override,
+            audio_start_offset=intro_duration,
+            overlay_assets=overlay_assets,
+            main_segment_duration=float(audio_duration or 0),
         )
         if (
             video_music_provider is not None

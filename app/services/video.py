@@ -9,7 +9,7 @@ import tempfile
 import unicodedata
 from contextlib import ExitStack, redirect_stdout
 from functools import lru_cache
-from typing import List
+from typing import List, Optional, Sequence
 from loguru import logger
 import numpy as np
 from moviepy import (
@@ -30,6 +30,7 @@ from app.models import const
 from app.models.schema import (
     MaterialInfo,
     VideoAspect,
+    VideoAsset,
     VideoConcatMode,
     VideoParams,
     VideoTransitionMode,
@@ -73,6 +74,8 @@ fps = 30
 # 这里给视频素材多留一个很小的安全余量，避免音频末尾因为帧舍入出现黑屏、
 # 卡顿或最后一小段旁白没有画面的情况。
 _VIDEO_DURATION_SAFETY_MARGIN = 0.1
+# Intro/outro clips play in full, but cap runaway uploads.
+_MAX_BOOKEND_DURATION = 30.0
 _MIN_MATERIAL_DIMENSION = 480
 # 消息类应用和部分编码器会把画面尺寸向下取整，例如 WhatsApp 会把 9:16 的
 # 素材压成 478x850，比 480 少两个像素。直接按 480 硬卡会让这类素材全部被
@@ -100,6 +103,226 @@ def _get_required_video_duration(audio_duration: float) -> float:
     轻量余量。函数独立出来，便于测试和后续按实际反馈调整余量大小。
     """
     return max(0.0, float(audio_duration) + _VIDEO_DURATION_SAFETY_MARGIN)
+
+
+def fit_clip_to_aspect(clip, video_width: int, video_height: int):
+    """Letterbox or scale a clip to the target frame size."""
+    clip_w, clip_h = clip.size
+    if clip_w == video_width and clip_h == video_height:
+        return clip
+
+    clip_ratio = clip.w / clip.h
+    video_ratio = video_width / video_height
+    if clip_ratio == video_ratio:
+        return clip.resized(new_size=(video_width, video_height))
+
+    if clip_ratio > video_ratio:
+        scale_factor = video_width / clip_w
+    else:
+        scale_factor = video_height / clip_h
+
+    new_width = int(clip_w * scale_factor)
+    new_height = int(clip_h * scale_factor)
+    background = ColorClip(
+        size=(video_width, video_height), color=(0, 0, 0)
+    ).with_duration(clip.duration)
+    clip_resized = clip.resized(new_size=(new_width, new_height)).with_position(
+        "center"
+    )
+    return CompositeVideoClip([background, clip_resized])
+
+
+def _overlay_position(
+    position: str,
+    margin: int,
+    overlay_w: int,
+    overlay_h: int,
+    video_width: int,
+    video_height: int,
+):
+    if position == "top_left":
+        return (margin, margin)
+    if position == "top_right":
+        return (max(margin, video_width - overlay_w - margin), margin)
+    if position == "bottom_left":
+        return (margin, max(margin, video_height - overlay_h - margin))
+    if position == "bottom_right":
+        return (
+            max(margin, video_width - overlay_w - margin),
+            max(margin, video_height - overlay_h - margin),
+        )
+    return ("center", "center")
+
+
+def build_overlay_clip(
+    asset: VideoAsset,
+    video_width: int,
+    video_height: int,
+    *,
+    main_start: float,
+    main_duration: float,
+):
+    """Build a timed logo/overlay clip positioned over the main segment."""
+    if not asset.url or not os.path.exists(asset.url):
+        return None
+
+    ext = utils.parse_extension(asset.url)
+    target_width = max(1, int(video_width * float(asset.scale or 0.15)))
+    opacity = float(asset.opacity if asset.opacity is not None else 1.0)
+    margin = int(asset.margin or 0)
+
+    if ext in const.FILE_TYPE_IMAGES:
+        clip = ImageClip(asset.url)
+    else:
+        clip = _open_video_clip_quietly(asset.url)
+
+    scale = target_width / max(1, clip.w)
+    clip = clip.resized(scale)
+    if opacity < 1.0 and hasattr(clip, "with_opacity"):
+        clip = clip.with_opacity(opacity)
+
+    overlay_start = main_start
+    overlay_end = main_start + main_duration
+    if asset.start_time is not None:
+        overlay_start = main_start + max(0.0, float(asset.start_time))
+    if asset.end_time is not None:
+        overlay_end = main_start + max(0.0, float(asset.end_time))
+    overlay_end = min(overlay_end, main_start + main_duration)
+    if overlay_end <= overlay_start:
+        close_clip(clip)
+        return None
+
+    duration = overlay_end - overlay_start
+    if getattr(clip, "duration", None):
+        clip = clip.subclipped(0, min(float(clip.duration), duration))
+    clip = clip.with_duration(duration).with_start(overlay_start)
+    clip = clip.with_position(
+        _overlay_position(
+            asset.position,
+            margin,
+            int(clip.w),
+            int(clip.h),
+            video_width,
+            video_height,
+        )
+    )
+    return clip
+
+
+def prepare_bookend_clip_file(
+    source_path: str,
+    output_path: str,
+    video_aspect: VideoAspect,
+    *,
+    max_duration: float = _MAX_BOOKEND_DURATION,
+) -> float:
+    """
+    Fit an intro/outro source to the output aspect, mute audio, and write a temp clip.
+
+    Returns the written clip duration (capped).
+    """
+    aspect = VideoAspect(video_aspect)
+    video_width, video_height = aspect.to_resolution()
+    ext = utils.parse_extension(source_path)
+
+    if ext in const.FILE_TYPE_IMAGES:
+        clip = ImageClip(source_path).with_duration(min(3.0, max_duration))
+    else:
+        clip = _open_video_clip_quietly(source_path)
+        if clip.duration and clip.duration > max_duration:
+            clip = clip.subclipped(0, max_duration)
+
+    try:
+        clip = fit_clip_to_aspect(clip, video_width, video_height)
+        # Strip audio so narration/BGM stay controlled in generate_video.
+        clip = clip.without_audio()
+        duration = float(clip.duration or 0.0)
+        _write_videofile_with_codec_fallback(
+            clip,
+            output_path,
+            codec=_get_configured_video_codec(),
+            logger=None,
+            fps=fps,
+            audio=False,
+        )
+        return duration
+    finally:
+        close_clip(clip)
+
+
+def apply_bookend_clips(
+    main_video_path: str,
+    output_path: str,
+    intro_paths: Sequence[str],
+    outro_paths: Sequence[str],
+    video_aspect: VideoAspect,
+    threads: int = 2,
+    max_bookend_duration: float = _MAX_BOOKEND_DURATION,
+) -> float:
+    """
+    Prepend intro and append outro clips around the narrated main timeline.
+
+    Returns total intro duration so callers can offset narration/subtitles.
+    """
+    intro_paths = [p for p in (intro_paths or []) if p]
+    outro_paths = [p for p in (outro_paths or []) if p]
+    if not intro_paths and not outro_paths:
+        if output_path != main_video_path:
+            # No bookends: keep using the main file as-is.
+            return 0.0
+        return 0.0
+
+    output_dir = os.path.dirname(output_path) or "."
+    prepared_intros: List[str] = []
+    prepared_outros: List[str] = []
+    intro_duration = 0.0
+
+    for index, source_path in enumerate(intro_paths, start=1):
+        clip_file = os.path.join(output_dir, f"bookend-intro-{index}.mp4")
+        try:
+            duration = prepare_bookend_clip_file(
+                source_path,
+                clip_file,
+                video_aspect,
+                max_duration=max_bookend_duration,
+            )
+        except Exception as exc:
+            logger.warning(f"skip intro asset {source_path}: {exc}")
+            continue
+        if duration > 0 and os.path.exists(clip_file):
+            prepared_intros.append(clip_file)
+            intro_duration += duration
+
+    for index, source_path in enumerate(outro_paths, start=1):
+        clip_file = os.path.join(output_dir, f"bookend-outro-{index}.mp4")
+        try:
+            duration = prepare_bookend_clip_file(
+                source_path,
+                clip_file,
+                video_aspect,
+                max_duration=max_bookend_duration,
+            )
+        except Exception as exc:
+            logger.warning(f"skip outro asset {source_path}: {exc}")
+            continue
+        if duration > 0 and os.path.exists(clip_file):
+            prepared_outros.append(clip_file)
+
+    if not prepared_intros and not prepared_outros:
+        return 0.0
+
+    clip_files = [*prepared_intros, main_video_path, *prepared_outros]
+    logger.info(
+        f"applying bookends: {len(prepared_intros)} intro(s), "
+        f"{len(prepared_outros)} outro(s), intro_duration={intro_duration:.2f}s"
+    )
+    concat_video_clips_with_ffmpeg(
+        clip_files=clip_files,
+        output_file=output_path,
+        threads=threads or 2,
+        output_dir=output_dir,
+    )
+    return intro_duration
 
 
 def is_material_resolution_acceptable(width: int, height: int) -> bool:
@@ -975,6 +1198,9 @@ def generate_video(
     output_file: str,
     params: VideoParams,
     bgm_file_override: str | None = None,
+    audio_start_offset: float = 0.0,
+    overlay_assets: Optional[List[VideoAsset]] = None,
+    main_segment_duration: float | None = None,
 ) -> bool:
     """
     合成最终视频，并返回本次背景音乐处理是否成功。
@@ -982,15 +1208,21 @@ def generate_video(
     返回值只描述 BGM 处理状态：没有请求 BGM 或成功混合时返回 True；请求了
     BGM 但加载、特效或混合失败时返回 False。即使 BGM 失败仍会继续输出只有
     旁白的视频，让任务编排层决定是否向用户展示降级警告。
+
+    audio_start_offset shifts narration and subtitles after intro bookends.
+    overlay_assets are composited under subtitles during the main segment.
     """
     aspect = VideoAspect(params.video_aspect)
     video_width, video_height = aspect.to_resolution()
+    narration_offset = max(0.0, float(audio_start_offset or 0.0))
 
     logger.info(f"generating video: {video_width} x {video_height}")
     logger.info(f"  ① video: {video_path}")
     logger.info(f"  ② audio: {audio_path}")
     logger.info(f"  ③ subtitle: {subtitle_path}")
     logger.info(f"  ④ output: {output_file}")
+    if narration_offset > 0:
+        logger.info(f"  ⑤ narration offset: {narration_offset:.2f}s")
 
     # https://github.com/harry0703/MoneyPrinterTurbo/issues/217
     # PermissionError: [WinError 32] The process cannot access the file because it is being used by another process: 'final-1.mp4.tempTEMP_MPY_wvf_snd.mp3'
@@ -1005,7 +1237,7 @@ def generate_video(
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
 
-        logger.info(f"  ⑤ font: {font_path}")
+        logger.info(f"  font: {font_path}")
 
     def resolve_subtitle_background_color():
         # 兼容历史参数：API 里 `text_background_color` 既可能是布尔值，
@@ -1143,9 +1375,11 @@ def generate_video(
                 size=size,
                 text_align="center",
             )
-        duration = subtitle_item[0][1] - subtitle_item[0][0]
-        _clip = _clip.with_start(subtitle_item[0][0])
-        _clip = _clip.with_end(subtitle_item[0][1])
+        start = float(subtitle_item[0][0]) + narration_offset
+        end = float(subtitle_item[0][1]) + narration_offset
+        duration = end - start
+        _clip = _clip.with_start(start)
+        _clip = _clip.with_end(end)
         _clip = _clip.with_duration(duration)
         if params.subtitle_position == "bottom":
             _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
@@ -1177,6 +1411,31 @@ def generate_video(
         audio_clip = voice_source_clip.with_effects(
             [afx.MultiplyVolume(params.voice_volume)]
         )
+        if narration_offset > 0:
+            audio_clip = audio_clip.with_start(narration_offset)
+
+        main_duration = (
+            float(main_segment_duration)
+            if main_segment_duration is not None and main_segment_duration > 0
+            else float(voice_source_clip.duration or 0.0)
+        )
+
+        overlay_clips = []
+        for asset in overlay_assets or []:
+            try:
+                overlay_clip = build_overlay_clip(
+                    asset,
+                    video_width,
+                    video_height,
+                    main_start=narration_offset,
+                    main_duration=main_duration,
+                )
+            except Exception as exc:
+                logger.warning(f"skip overlay asset {getattr(asset, 'url', '')}: {exc}")
+                continue
+            if overlay_clip is not None:
+                overlay_clips.append(overlay_clip)
+                clip_stack.callback(overlay_clip.close)
 
         def make_textclip(text):
             return TextClip(
@@ -1185,6 +1444,7 @@ def generate_video(
                 font_size=params.font_size,
             )
 
+        text_clips = []
         if subtitle_path and os.path.exists(subtitle_path):
             sub = clip_stack.enter_context(
                 SubtitlesClip(
@@ -1193,11 +1453,15 @@ def generate_video(
                     make_textclip=make_textclip,
                 )
             )
-            text_clips = []
             for item in sub.subtitles:
                 clip = create_text_clip(subtitle_item=item)
                 text_clips.append(clip)
-            video_clip = CompositeVideoClip([video_clip, *text_clips])
+
+        # Overlays sit under subtitles so captions stay readable.
+        if overlay_clips or text_clips:
+            video_clip = CompositeVideoClip(
+                [video_clip, *overlay_clips, *text_clips]
+            )
             clip_stack.callback(video_clip.close)
 
         bgm_enabled = bgm_service.should_use_bgm(
