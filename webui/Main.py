@@ -38,6 +38,8 @@ from app.models.schema import (
     VideoConcatMode,
     VideoParams,
     VideoTransitionMode,
+    normalize_video_sources,
+    video_sources_from_params,
 )
 from app.services import bgm as bgm_service
 from app.services import cache_manager, hyperframes, llm, video, voice, webui_task
@@ -189,7 +191,14 @@ def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
     }.get(ext, "audio/mp3")
 
 
-def _build_uploaded_file_path(uploaded_file, target_dir, allowed_extensions, prefix):
+def _build_uploaded_file_path(
+    uploaded_file,
+    target_dir,
+    allowed_extensions,
+    prefix,
+    *,
+    preserve_original_name: bool = False,
+):
     """为浏览器上传文件生成受控的服务端保存路径。"""
     original_name = os.path.basename(str(uploaded_file.name or ""))
     extension = os.path.splitext(original_name)[1].lower()
@@ -201,11 +210,31 @@ def _build_uploaded_file_path(uploaded_file, target_dir, allowed_extensions, pre
 
     normalized_target_dir = os.path.realpath(target_dir)
     os.makedirs(normalized_target_dir, exist_ok=True)
-    # 不复用浏览器传入的文件名，避免路径分隔符、控制字符或同名覆盖。UUID 只用于
-    # 服务端落盘，不改变用户在上传控件中看到的原始名称。
-    file_path = os.path.realpath(
-        os.path.join(normalized_target_dir, f"{prefix}-{uuid4().hex}{extension}")
-    )
+
+    if preserve_original_name:
+        safe_stem = re.sub(r"[^\w.\-]+", "_", os.path.splitext(original_name)[0]).strip(
+            "._"
+        )
+        if not safe_stem:
+            safe_stem = prefix
+        candidate_name = f"{safe_stem}{extension}"
+        file_path = os.path.realpath(
+            os.path.join(normalized_target_dir, candidate_name)
+        )
+        suffix = 1
+        while os.path.exists(file_path):
+            candidate_name = f"{safe_stem}-{suffix}{extension}"
+            file_path = os.path.realpath(
+                os.path.join(normalized_target_dir, candidate_name)
+            )
+            suffix += 1
+    else:
+        # 不复用浏览器传入的文件名，避免路径分隔符、控制字符或同名覆盖。UUID 只用于
+        # 服务端落盘，不改变用户在上传控件中看到的原始名称。
+        file_path = os.path.realpath(
+            os.path.join(normalized_target_dir, f"{prefix}-{uuid4().hex}{extension}")
+        )
+
     if os.path.commonpath([normalized_target_dir, file_path]) != normalized_target_dir:
         logger.warning(f"invalid uploaded file path: {file_path}")
         raise ValueError("invalid uploaded file path")
@@ -315,6 +344,47 @@ def _find_final_task_video(task_path: str) -> str:
     return os.path.join(task_path, file_name)
 
 
+def _params_include_local_source(params: Mapping | None) -> bool:
+    """True when params select local materials (list or legacy string)."""
+    params = params or {}
+    sources = params.get("video_sources")
+    if sources in (None, "", []):
+        sources = params.get("video_source")
+    if isinstance(sources, str):
+        items = [
+            part.strip().lower()
+            for part in sources.replace(";", ",").split(",")
+            if part.strip()
+        ]
+    elif isinstance(sources, (list, tuple, set)):
+        items = [str(part).strip().lower() for part in sources if str(part).strip()]
+    else:
+        items = []
+    return "local" in items
+
+
+def _normalize_source_selection(value) -> list[str]:
+    if isinstance(value, str):
+        items = [
+            part.strip().lower()
+            for part in value.replace(";", ",").split(",")
+            if part.strip()
+        ]
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(part).strip().lower() for part in value if str(part).strip()]
+    else:
+        items = []
+    allowed = {"pexels", "pixabay", "coverr", "local"}
+    normalized = []
+    seen = set()
+    for item in items:
+        if item not in allowed or item in seen:
+            continue
+        normalized.append(item)
+        seen.add(item)
+    return normalized
+
+
 def _build_restore_upload_requirements(params: Mapping) -> dict:
     """
     记录历史任务中无法由 Streamlit 自动恢复的上传文件依赖。
@@ -323,7 +393,7 @@ def _build_restore_upload_requirements(params: Mapping) -> dict:
     素材和自定义音频依赖，并在用户重新生成前检查是否已经主动补充或替换。
     """
     return {
-        "local_materials": params.get("video_source") == "local",
+        "local_materials": _params_include_local_source(params),
         "custom_audio": bool(params.get("custom_audio_file")),
         "original_voice_name": params.get("voice_name") or "",
     }
@@ -332,7 +402,8 @@ def _build_restore_upload_requirements(params: Mapping) -> dict:
 def _get_unmet_restore_upload_requirements(
     requirements: Mapping | None,
     *,
-    video_source: str,
+    video_source: str | list | None = None,
+    video_sources: list | None = None,
     voice_name: str,
     has_local_materials: bool,
     has_custom_audio: bool,
@@ -341,10 +412,13 @@ def _get_unmet_restore_upload_requirements(
     """返回当前表单仍未满足的历史上传文件依赖。"""
     requirements = requirements or {}
     unmet = set()
+    sources = _normalize_source_selection(
+        video_sources if video_sources is not None else video_source
+    )
 
     if (
         requirements.get("local_materials")
-        and video_source == "local"
+        and "local" in sources
         and not has_local_materials
     ):
         unmet.add("local_materials")
@@ -896,8 +970,8 @@ def _apply_pending_task_restore():
     )
 
     # 视频设置。素材上传控件不能由服务端写入，因此本地素材需要用户重新选择。
-    video_source = params.get("video_source") or "pexels"
-    _set_stable_widget_value("video_source_select", video_source)
+    video_sources = video_sources_from_params(params)
+    _set_stable_widget_value("video_source_select", video_sources)
     _set_stable_widget_value(
         "video_concat_mode_select", params.get("video_concat_mode") or "random"
     )
@@ -905,8 +979,9 @@ def _apply_pending_task_restore():
         "video_transition_mode_select",
         params.get("video_transition_mode") or VideoTransitionMode.none.value,
     )
+    aspect_key_suffix = "+".join(video_sources) if video_sources else "pexels"
     _set_stable_widget_value(
-        f"video_aspect_for_{video_source}",
+        f"video_aspect_for_{aspect_key_suffix}",
         params.get("video_aspect") or VideoAspect.portrait.value,
     )
     _set_stable_widget_value(
@@ -1538,6 +1613,39 @@ def stable_selectbox(label, options, default_value, key, format_func=None, **kwa
     )
 
 
+def stable_multiselect(
+    label, options, default_values, key, format_func=None, **kwargs
+):
+    """Multi-select companion to ``stable_selectbox`` with localized widget keys."""
+    options = list(options)
+    if not options:
+        raise ValueError(f"multiselect options cannot be empty: {key}")
+
+    option_set = set(options)
+    defaults = [value for value in (default_values or []) if value in option_set]
+    if not defaults:
+        defaults = [options[0]]
+
+    widget_key = localized_widget_key(key)
+    selected_values = st.session_state.get(widget_key)
+    if not isinstance(selected_values, list) or not selected_values:
+        st.session_state[widget_key] = defaults
+    else:
+        filtered = [value for value in selected_values if value in option_set]
+        st.session_state[widget_key] = filtered or defaults
+
+    if format_func is None:
+        format_func = str
+
+    return st.multiselect(
+        label,
+        options=options,
+        format_func=format_func,
+        key=widget_key,
+        **kwargs,
+    )
+
+
 def sync_script_order_concat_mode():
     """在文案顺序匹配开启时固定使用顺序拼接，并在关闭后恢复原选择。"""
     widget_key = localized_widget_key("video_concat_mode_select")
@@ -2071,6 +2179,7 @@ def _render_script_settings(panel, params):
             params.video_subject = st.text_input(
                 tr("Video Subject"),
                 placeholder=tr("Video Subject Placeholder"),
+                help=tr("Video Source Mix Prompt Help"),
                 key="video_subject",
             ).strip()
 
@@ -2238,20 +2347,28 @@ def _render_video_settings(panel, params):
                 (tr("Local file"), "local"),
             ]
 
-            saved_video_source_name = config.app.get("video_source", "pexels")
+            saved_video_sources = normalize_video_sources(
+                config.app.get(
+                    "video_sources",
+                    config.app.get("video_source", "pexels"),
+                )
+            )
 
-            params.video_source = stable_selectbox(
+            params.video_sources = stable_multiselect(
                 tr("Video Source"),
                 options=[value for _, value in video_sources],
-                default_value=saved_video_source_name,
+                default_values=saved_video_sources,
                 key="video_source_select",
                 format_func=lambda value: dict(
                     (v, label) for label, v in video_sources
                 )[value],
+                help=tr("Video Source Multiselect Help"),
             )
-            config.app["video_source"] = params.video_source
+            if not params.video_sources:
+                params.video_sources = ["pexels"]
+            config.app["video_sources"] = list(params.video_sources)
 
-            if params.video_source == "local":
+            if "local" in params.video_sources:
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
                 local_file_types = sorted(
                     extension.removeprefix(".")
@@ -2263,7 +2380,8 @@ def _render_video_settings(panel, params):
                     + [file_type.upper() for file_type in local_file_types],
                     accept_multiple_files=True,
                     key="local_video_materials_uploader",
-                )
+                    help=tr("Upload Local Files Mix Help"),
+                ) or []
 
             # 文案顺序匹配会从关键词生成到最终合成全程保持叙事顺序，因此开启时
             # 顺序拼接是唯一符合实际执行逻辑的选项。同步控件值可避免界面仍显示
@@ -2316,17 +2434,20 @@ def _render_video_settings(panel, params):
                 (tr("Landscape"), VideoAspect.landscape.value),
             ]
             # Coverr 库 99% 是 16:9 横屏,默认竖屏会让画面被大量黑边包围。
-            # 用 source-specific widget key 让每个 source 各自记忆 aspect 选择:
-            #   - 首次切到 coverr → 默认 Landscape(index=1)
-            #   - 其他 source 沿用 Portrait(index=0)
-            #   - 用户在某 source 下手动改过 aspect,session_state 会记住,
-            #     下次回到同一 source 时尊重用户选择,不会再被强制覆盖。
-            default_aspect_index = 1 if params.video_source == "coverr" else 0
+            # 用 source-specific widget key 让每个 source 组合各自记忆 aspect 选择:
+            #   - 首次切到仅 coverr → 默认 Landscape(index=1)
+            #   - 其他组合沿用 Portrait(index=0)
+            #   - 用户在某组合下手动改过 aspect,session_state 会记住,
+            #     下次回到同一组合时尊重用户选择,不会再被强制覆盖。
+            aspect_key_suffix = "+".join(params.video_sources) or "pexels"
+            default_aspect_index = (
+                1 if params.video_sources == ["coverr"] else 0
+            )
             selected_aspect_ratio = stable_selectbox(
                 tr("Video Ratio"),
                 options=[value for _, value in video_aspect_ratios],
                 default_value=video_aspect_ratios[default_aspect_index][1],
-                key=f"video_aspect_for_{params.video_source}",
+                key=f"video_aspect_for_{aspect_key_suffix}",
                 format_func=lambda value: dict(
                     (v, label) for label, v in video_aspect_ratios
                 )[value],
@@ -3723,7 +3844,7 @@ def _render_generation_controls(
     has_custom_audio = bool(uploaded_audio_file)
     unmet_restore_requirements = _get_unmet_restore_upload_requirements(
         restore_upload_requirements,
-        video_source=params.video_source,
+        video_sources=params.video_sources,
         voice_name=params.voice_name or "",
         has_local_materials=has_local_materials,
         has_custom_audio=has_custom_audio,
@@ -3758,26 +3879,28 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
-        if params.video_source not in ["pexels", "pixabay", "coverr", "local"]:
+        selected_sources = normalize_video_sources(params.video_sources)
+        params.video_sources = selected_sources
+        if not selected_sources:
             _remove_active_generation_task(task_id)
             st.error(tr("Please Select a Valid Video Source"))
             st.stop()
 
-        if params.video_source == "pexels" and not config.app.get(
+        if "pexels" in selected_sources and not config.app.get(
             "pexels_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pexels API Key"))
             st.stop()
 
-        if params.video_source == "pixabay" and not config.app.get(
+        if "pixabay" in selected_sources and not config.app.get(
             "pixabay_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pixabay API Key"))
             st.stop()
 
-        if params.video_source == "coverr" and not config.app.get(
+        if "coverr" in selected_sources and not config.app.get(
             "coverr_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
@@ -3808,7 +3931,7 @@ def _render_generation_controls(
             st.caption(hyperframes.get_readiness().message)
             st.stop()
 
-        if params.video_source == "local" and not has_local_materials:
+        if "local" in selected_sources and not has_local_materials:
             # 本地素材为空时继续执行会先产生 TTS/字幕，最后才在素材预处理阶段失败。
             # 在任务启动前拦截，可以避免无意义的 API 调用和中间文件。
             _remove_active_generation_task(task_id)
@@ -3883,6 +4006,7 @@ def _render_generation_controls(
                         local_videos_dir,
                         LOCAL_MATERIAL_EXTENSIONS,
                         "material",
+                        preserve_original_name=True,
                     )
                 except ValueError:
                     _remove_active_generation_task(task_id)
@@ -3893,18 +4017,21 @@ def _render_generation_controls(
                     m = MaterialInfo()
                     m.provider = "local"
                     m.url = file_path
+                    m.name = os.path.basename(file_path)
                     params.video_materials.append(m)
                     persisted_local_materials.append(
                         {
                             "provider": m.provider,
                             "url": m.url,
                             "duration": m.duration,
+                            "name": m.name,
                         }
                     )
             # 将已上传并保存到本地的视频素材写入会话，供后续只改文案时直接复用。
             st.session_state["local_video_materials"] = persisted_local_materials
         elif (
-            params.video_source == "local" and st.session_state["local_video_materials"]
+            "local" in normalize_video_sources(params.video_sources)
+            and st.session_state["local_video_materials"]
         ):
             # 当用户没有重新上传文件时，复用最近一次已经保存到磁盘的本地素材列表。
             params.video_materials = []
@@ -3913,6 +4040,9 @@ def _render_generation_controls(
                 m.provider = material.get("provider", "local")
                 m.url = material.get("url", "")
                 m.duration = material.get("duration", 0)
+                m.name = material.get("name") or os.path.basename(
+                    str(m.url or "").replace("\\", "/")
+                )
                 if m.url:
                     params.video_materials.append(m)
 

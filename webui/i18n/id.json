@@ -281,6 +281,9 @@
         "HyperFrames Not Ready": "HyperFrames is selected but not ready. Install Node.js 22+, FFmpeg, then run `npx hyperframes browser ensure`.",
         "HyperFrames Ready Help": "Each output video will be rendered from an editable HyperFrames project under the task folder.",
         "HyperFrames Project Ready": "HyperFrames project ready. Open the folder to preview or edit:",
-        "HyperFrames Project Help": "Run `npx hyperframes preview` inside the project folder, or `npx hyperframes render --output out.mp4`."
+        "HyperFrames Project Help": "Run `npx hyperframes preview` inside the project folder, or `npx hyperframes render --output out.mp4`.",
+        "Video Source Multiselect Help": "Pilih satu atau lebih sumber materi. Gabungkan Local dengan penyedia online. Jelaskan cara menggabungkannya di subjek atau skrip.",
+        "Video Source Mix Prompt Help": "Untuk mencampur materi lokal dan online, jelaskan urutannya di prompt ini.",
+        "Upload Local Files Mix Help": "Unggah logo, intro, outro, atau klip. Pertahankan nama file yang bermakna."
     }
 }

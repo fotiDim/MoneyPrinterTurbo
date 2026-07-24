@@ -129,6 +129,7 @@ Thanks to [Kimi](https://platform.kimi.ai?aff=MoneyPrinterTurbo) for sponsoring 
 - [x] Supports **subtitle generation** with configurable fonts, position, color, size, outline, and background styles
 - [x] Supports random or custom **background music** with adjustable volume
 - [x] Supports your own **local assets** and free-to-use HD footage from **Pexels**, **Pixabay**, and **Coverr**
+- [x] Supports **multi-select material sources**, so you can mix local files with one or more online libraries; describe the combination in the video subject/script (for example logo first, stock B-roll in the middle, ending last) and the LLM plans material order from that prompt
 - [x] Supports leading model providers including **Kimi / Moonshot AI**, **OpenAI**, **Google Gemini**, **DeepSeek**, **Alibaba Cloud Qwen**, **Microsoft Azure OpenAI**, **ByteDance VolcEngine Ark**, **xAI Grok**, **MiniMax**, and **Xiaomi MiMo**, plus unified gateways, aggregators, and local runtimes such as **Cloudflare AI Gateway**, **Alibaba ModelScope**, **AIHubMix**, **AIML API**, **EvoLink**, **Ollama**, **OneAPI**, **LiteLLM**, **Groq**, and **Pollinations AI**
 - [x] Supports one-click **cross-platform publishing** to **TikTok**, **Instagram**, and **YouTube Shorts** after video generation
 
@@ -238,7 +239,7 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 
 #### ② Configure the Project (Optional)
 
-On first launch, the project creates `config.toml` from `config.example.toml`. You can configure the LLM provider, footage source, and related API keys directly in the WebUI basic settings.
+On first launch, the project creates `config.toml` from `config.example.toml`. You can configure the LLM provider, material sources (multi-select), and related API keys directly in the WebUI basic settings.
 
 ### Docker Deployment 🐳
 
@@ -342,6 +343,21 @@ command line. The simplest complete generation command is:
 ```shell
 uv run python cli.py --video-subject "How AI is changing everyday life"
 ```
+
+You can also select multiple material sources. When mixing local files with online
+stock, describe the order in the subject or script (for example logo first, stock
+B-roll next, ending last):
+
+```shell
+uv run python cli.py \
+  --video-subject "Open with logo.png, then office B-roll, close with ending.mp4" \
+  --video-source local,pexels \
+  --video-materials "./logo.png,./ending.mp4"
+```
+
+`--video-source` accepts comma-separated values or repeated flags (`pexels`,
+`pixabay`, `coverr`, `local`). Use `--video-materials` whenever `local` is
+included.
 
 For the complete command reference, parameter descriptions, and usage instructions,
 run:

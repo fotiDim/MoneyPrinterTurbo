@@ -13,7 +13,14 @@ from loguru import logger
 
 from app.config import config
 from app.models import const
-from app.models.schema import VideoConcatMode, VideoParams
+from app.models.schema import (
+    VideoConcatMode,
+    VideoParams,
+    has_local_video_source,
+    is_local_only_video_source,
+    online_video_sources,
+    video_sources_from_params,
+)
 from app.services import bgm as bgm_service
 from app.services import (
     elevenlabs_music,
@@ -566,8 +573,52 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
+def _local_material_display_name(material) -> str:
+    name = str(getattr(material, "name", "") or "").strip()
+    if name:
+        return os.path.basename(name.replace("\\", "/"))
+    url = str(getattr(material, "url", "") or "").strip()
+    return os.path.basename(url.replace("\\", "/")) if url else ""
+
+
+def _find_local_material_by_name(materials, file_name: str):
+    target = os.path.basename(str(file_name or "").replace("\\", "/")).strip().lower()
+    if not target:
+        return None
+    for material in materials or []:
+        candidates = {
+            _local_material_display_name(material).lower(),
+            os.path.basename(str(getattr(material, "url", "") or "").replace("\\", "/")).lower(),
+        }
+        if target in candidates:
+            return material
+        # Allow matching logo.png against logo-1.png style uniquified names.
+        for candidate in candidates:
+            stem, ext = os.path.splitext(candidate)
+            target_stem, target_ext = os.path.splitext(target)
+            if ext == target_ext and (
+                stem == target_stem
+                or stem.startswith(f"{target_stem}-")
+                or target_stem.startswith(f"{stem}-")
+            ):
+                return material
+    return None
+
+
+def _should_use_material_plan(params: VideoParams) -> bool:
+    sources = video_sources_from_params(params)
+    online = [source for source in sources if source != "local"]
+    has_local = "local" in sources and bool(params.video_materials)
+    return bool(online) and (has_local or len(online) > 1)
+
+
 def get_video_materials(task_id, params, video_terms, audio_duration):
-    if params.video_source == "local":
+    params.material_plan_applied = False
+    sources = video_sources_from_params(params)
+    online_sources = online_video_sources(params)
+    include_local = has_local_video_source(params)
+
+    if is_local_only_video_source(params):
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
             materials=params.video_materials, clip_duration=params.video_clip_duration
@@ -580,14 +631,42 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             )
             return None
         return [material_info.url for material_info in materials]
-    else:
-        logger.info(f"\n\n## downloading videos from {params.video_source}")
-        # 顺序匹配模式只在用户显式开启时生效。这里强制素材下载按关键词顺序
-        # 轮询，避免某个早期关键词下载太多素材，把后续脚本主题挤出最终时间线。
+
+    if _should_use_material_plan(params):
+        local_names = [
+            _local_material_display_name(material)
+            for material in (params.video_materials or [])
+            if _local_material_display_name(material)
+        ]
+        plan = llm.generate_material_plan(
+            video_subject=params.video_subject,
+            video_script=params.video_script,
+            selected_sources=sources,
+            local_files=local_names,
+            amount=8 if params.match_materials_to_script else 5,
+        )
+        planned_paths = _resolve_material_plan(
+            task_id=task_id,
+            params=params,
+            plan=plan,
+            audio_duration=audio_duration,
+        )
+        if planned_paths:
+            params.material_plan_applied = True
+            logger.success(
+                f"applied material plan with {len(planned_paths)} clips"
+            )
+            return planned_paths
+        logger.warning("material plan empty or failed; falling back to merged download")
+
+    downloaded_videos: list[str] = []
+    if online_sources:
+        logger.info(f"\n\n## downloading videos from {online_sources}")
         downloaded_videos = material.download_videos(
             task_id=task_id,
-            search_terms=video_terms,
-            source=params.video_source,
+            search_terms=video_terms or [],
+            source=online_sources[0],
+            sources=online_sources,
             video_aspect=params.video_aspect,
             video_concat_mode=(
                 VideoConcatMode.sequential
@@ -598,20 +677,83 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             max_clip_duration=params.video_clip_duration,
             match_script_order=params.match_materials_to_script,
         )
-        if not downloaded_videos:
-            _mark_task_failed(
-                task_id,
-                "materials",
-                f"failed to download video materials from {params.video_source}",
+
+    if include_local and params.video_materials:
+        logger.info("\n\n## preprocess local materials for mixed sources")
+        local_materials = video.preprocess_video(
+            materials=params.video_materials, clip_duration=params.video_clip_duration
+        )
+        local_paths = [
+            material_info.url
+            for material_info in (local_materials or [])
+            if material_info.url
+        ]
+        downloaded_videos.extend(local_paths)
+
+    if not downloaded_videos:
+        _mark_task_failed(
+            task_id,
+            "materials",
+            f"failed to prepare video materials from {sources}",
+        )
+        return None
+    return downloaded_videos
+
+
+def _resolve_material_plan(task_id, params: VideoParams, plan, audio_duration: float):
+    if not plan:
+        return []
+
+    paths: list[str] = []
+    exclude_urls: set[str] = set()
+    online = online_video_sources(params)
+    local_materials = list(params.video_materials or [])
+
+    for slot in plan:
+        kind = str(slot.get("kind") or "").strip().lower()
+        if kind == "local":
+            local_item = _find_local_material_by_name(local_materials, slot.get("file"))
+            if local_item is None:
+                logger.warning(f"material plan local file not found: {slot.get('file')}")
+                continue
+            processed = video.preprocess_video(
+                materials=[local_item], clip_duration=params.video_clip_duration
             )
-            return None
-        return downloaded_videos
+            if not processed:
+                continue
+            url = processed[0].url
+            if url:
+                paths.append(url)
+            continue
+
+        if kind == "search":
+            term = str(slot.get("term") or "").strip()
+            source = str(slot.get("source") or "").strip().lower()
+            if not term:
+                continue
+            if source not in online:
+                source = online[0] if online else "pexels"
+            saved = material.download_video_for_term(
+                task_id=task_id,
+                search_term=term,
+                source=source,
+                video_aspect=params.video_aspect,
+                max_clip_duration=params.video_clip_duration,
+                exclude_urls=exclude_urls,
+            )
+            if saved:
+                paths.append(saved)
+
+    return paths
 
 
 def _resolve_output_concat_mode(params: VideoParams) -> VideoConcatMode:
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
     # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
-    if params.match_materials_to_script:
+    # LLM material plans also require sequential concat to keep planned order.
+    if params.match_materials_to_script or getattr(
+        params, "material_plan_applied", False
+    ):
         return VideoConcatMode.sequential
     if params.video_count == 1:
         return params.video_concat_mode
@@ -1234,7 +1376,7 @@ def _run_pipeline(
 
     # 2. Generate terms
     video_terms = ""
-    if params.video_source != "local":
+    if not is_local_only_video_source(params):
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             return _mark_task_failed(

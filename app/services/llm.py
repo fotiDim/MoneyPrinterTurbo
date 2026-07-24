@@ -686,6 +686,200 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def generate_material_plan(
+    video_subject: str,
+    video_script: str,
+    selected_sources: List[str],
+    local_files: List[str],
+    amount: int = 8,
+) -> List[dict]:
+    """
+    Ask the LLM to order local files and online search slots from the user prompt.
+
+    Returns a list of slot dicts:
+      {"kind": "local", "file": "<filename>"}
+      {"kind": "search", "term": "<1-3 words>", "source": "pexels|pixabay|coverr"}
+    """
+    sources = [
+        str(source or "").strip().lower()
+        for source in (selected_sources or [])
+        if str(source or "").strip()
+    ]
+    online_sources = [source for source in sources if source != "local"]
+    local_names = [
+        str(name or "").strip()
+        for name in (local_files or [])
+        if str(name or "").strip()
+    ]
+
+    if not online_sources and not local_names:
+        return []
+
+    # Local-only selections do not need an LLM plan; callers preprocess files.
+    if not online_sources:
+        return [{"kind": "local", "file": name} for name in local_names]
+
+    amount = max(1, min(int(amount or 8), 16))
+    local_files_json = json.dumps(local_names, ensure_ascii=False)
+    online_sources_json = json.dumps(online_sources, ensure_ascii=False)
+    example_slots = []
+    if local_names:
+        example_slots.append({"kind": "local", "file": local_names[0]})
+    example_slots.append(
+        {
+            "kind": "search",
+            "term": "opening visual topic",
+            "source": online_sources[0],
+        }
+    )
+    if len(local_names) > 1:
+        example_slots.append({"kind": "local", "file": local_names[-1]})
+    output_example = json.dumps(example_slots[: max(2, min(amount, 4))], ensure_ascii=False)
+
+    prompt = f"""
+# Role: Video Material Planner
+
+## Goals:
+Build an ordered material plan for a video. Follow the user's subject and script
+when deciding how local files and online stock clips should be combined
+(for example: open with a logo, use stock B-roll in the middle, close with an ending clip).
+
+## Constrains:
+1. return a json-array only; no markdown, no commentary.
+2. each item must be either:
+   - {{"kind":"local","file":"<exact filename from Local Files>"}}
+   - {{"kind":"search","term":"<1-3 english words>","source":"<one of Online Sources>"}}
+3. local slots may only use filenames from Local Files.
+4. search slots may only use sources from Online Sources.
+5. produce about {amount} slots total (more search slots if the script is long).
+6. honor explicit user instructions about intro/logo/outro/order when present.
+7. if Local Files exist but the prompt does not mention them, include them only when
+   filenames clearly imply branding/intro/outro (logo, intro, outro, ending, closing);
+   otherwise prefer search slots for the narrative and you may omit unused locals.
+8. when multiple online sources are available and the user does not name one,
+   distribute search slots across them (round-robin).
+9. search terms must be English and related to the video subject/script.
+
+## Output Example:
+{output_example}
+
+## Context:
+### Video Subject
+{video_subject}
+
+### Video Script
+{video_script}
+
+### Selected Sources
+{json.dumps(sources, ensure_ascii=False)}
+
+### Online Sources
+{online_sources_json}
+
+### Local Files
+{local_files_json}
+""".strip()
+
+    logger.info(
+        f"material plan: subject={video_subject!r}, sources={sources}, "
+        f"local_files={len(local_names)}"
+    )
+
+    plan: List[dict] = []
+    response = ""
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if response.startswith("Error: "):
+                logger.error(f"failed to generate material plan: {response}")
+                return []
+            parsed = json.loads(_strip_code_fence(response))
+            if not isinstance(parsed, list):
+                logger.error("material plan response is not a list.")
+                continue
+            plan = _normalize_material_plan(
+                parsed,
+                online_sources=online_sources,
+                local_files=local_names,
+            )
+        except Exception as e:
+            logger.warning(f"failed to generate material plan: {str(e)}")
+            if response:
+                match = re.search(r"\[.*]", response, re.DOTALL)
+                if match:
+                    try:
+                        parsed = json.loads(match.group())
+                        plan = _normalize_material_plan(
+                            parsed,
+                            online_sources=online_sources,
+                            local_files=local_names,
+                        )
+                    except Exception as parse_error:
+                        logger.warning(
+                            f"failed to parse material plan JSON: {str(parse_error)}"
+                        )
+
+        if plan:
+            break
+        if i < _max_retries:
+            logger.warning(f"failed to generate material plan, trying again... {i + 1}")
+
+    logger.success(f"material plan completed: {json.dumps(plan, ensure_ascii=False)}")
+    return plan
+
+
+def _normalize_material_plan(
+    raw_plan: List,
+    *,
+    online_sources: List[str],
+    local_files: List[str],
+) -> List[dict]:
+    local_lookup = {name.lower(): name for name in local_files}
+    online_set = set(online_sources)
+    online_index = 0
+    normalized: List[dict] = []
+
+    for item in raw_plan:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+        if kind == "local":
+            file_name = str(
+                item.get("file") or item.get("name") or item.get("url") or ""
+            ).strip()
+            if not file_name:
+                continue
+            matched = local_lookup.get(file_name.lower())
+            if matched is None:
+                # Allow matching by basename when the model returns a path.
+                base = file_name.replace("\\", "/").split("/")[-1].lower()
+                matched = local_lookup.get(base)
+            if matched is None:
+                continue
+            normalized.append({"kind": "local", "file": matched})
+            continue
+
+        if kind in {"search", "online", "stock"}:
+            if not online_sources:
+                continue
+            term = str(item.get("term") or item.get("query") or "").strip()
+            if not term:
+                continue
+            source = str(item.get("source") or "").strip().lower()
+            if source not in online_set:
+                source = online_sources[online_index % len(online_sources)]
+                online_index += 1
+            normalized.append(
+                {
+                    "kind": "search",
+                    "term": term,
+                    "source": source,
+                }
+            )
+
+    return normalized
+
+
 # =============================================================================
 # Social publishing metadata
 #

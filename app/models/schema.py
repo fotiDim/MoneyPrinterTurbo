@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Any, List, Literal, Optional, Union
 
 import pydantic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.config import config
 
@@ -13,6 +13,73 @@ warnings.filterwarnings(
     category=UserWarning,
     message="Field name.*shadows an attribute in parent.*",
 )
+
+ALLOWED_VIDEO_SOURCES = ("pexels", "pixabay", "coverr", "local")
+ONLINE_VIDEO_SOURCES = ("pexels", "pixabay", "coverr")
+
+
+def normalize_video_sources(value: Any, default: str = "pexels") -> List[str]:
+    """
+    Normalize a video source string/list into a de-duplicated allowlisted list.
+
+    Accepts legacy single-string values (including comma-separated) and list-like
+    config/API payloads. Unknown entries are dropped; empty input falls back to
+    ``default`` when that default is allowlisted.
+    """
+    if value is None:
+        items: list[Any] = []
+    elif isinstance(value, str):
+        items = [part.strip() for part in value.replace(";", ",").split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        items = [value]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        source = str(item or "").strip().lower()
+        if not source or source not in ALLOWED_VIDEO_SOURCES or source in seen:
+            continue
+        normalized.append(source)
+        seen.add(source)
+
+    if normalized:
+        return normalized
+
+    fallback = str(default or "").strip().lower()
+    if fallback in ALLOWED_VIDEO_SOURCES:
+        return [fallback]
+    return ["pexels"]
+
+
+def video_sources_from_params(params: Any) -> List[str]:
+    """Read normalized sources from VideoParams or a plain mapping."""
+    if params is None:
+        return ["pexels"]
+
+    if isinstance(params, dict):
+        if "video_sources" in params:
+            return normalize_video_sources(params.get("video_sources"))
+        return normalize_video_sources(params.get("video_source"))
+
+    sources = getattr(params, "video_sources", None)
+    if sources:
+        return normalize_video_sources(sources)
+    return normalize_video_sources(getattr(params, "video_source", None))
+
+
+def has_local_video_source(params: Any) -> bool:
+    return "local" in video_sources_from_params(params)
+
+
+def online_video_sources(params: Any) -> List[str]:
+    return [source for source in video_sources_from_params(params) if source != "local"]
+
+
+def is_local_only_video_source(params: Any) -> bool:
+    sources = video_sources_from_params(params)
+    return sources == ["local"]
 
 
 class VideoConcatMode(str, Enum):
@@ -55,6 +122,9 @@ class MaterialInfo:
     provider: str = "pexels"
     url: str = ""
     duration: int = 0
+    # Original upload/display name used by the material planner; optional for
+    # backward-compatible payloads that only carry a path in ``url``.
+    name: str = ""
 
 
 class VideoParams(BaseModel):
@@ -83,10 +153,46 @@ class VideoParams(BaseModel):
     match_materials_to_script: bool = False
     video_count: Optional[int] = 1
 
-    video_source: Optional[str] = "pexels"
+    # Multi-select material providers. Legacy single-string ``video_source`` is
+    # accepted on input and normalized into this list.
+    video_sources: List[str] = Field(default_factory=lambda: ["pexels"])
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )
+    # Set at runtime when an LLM material plan was applied; forces sequential concat.
+    material_plan_applied: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_video_sources(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        payload = dict(data)
+        if "video_sources" in payload and payload.get("video_sources") not in (
+            None,
+            "",
+            [],
+        ):
+            payload["video_sources"] = normalize_video_sources(
+                payload.get("video_sources")
+            )
+        elif "video_source" in payload:
+            payload["video_sources"] = normalize_video_sources(
+                payload.get("video_source")
+            )
+        return payload
+
+    @field_validator("video_sources", mode="after")
+    @classmethod
+    def _validate_video_sources(cls, value: List[str]) -> List[str]:
+        return normalize_video_sources(value)
+
+    @property
+    def video_source(self) -> str:
+        """Legacy single-source accessor used by older call sites and task JSON."""
+        sources = self.video_sources or ["pexels"]
+        return sources[0] if sources else "pexels"
     
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore TTS and can still use Whisper subtitles
     video_language: Optional[str] = ""  # auto detect

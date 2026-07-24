@@ -293,6 +293,37 @@ def save_config():
 
 _cfg = load_config()
 app = _SynchronizedConfig(_cfg.get("app", {}))
+# Normalize legacy scalar video_source into video_sources list for runtime use.
+_raw_video_sources = app.get("video_sources", None)
+if _raw_video_sources in (None, "", []):
+    _raw_video_sources = app.get("video_source", "pexels")
+if isinstance(_raw_video_sources, str):
+    _normalized_video_sources = [
+        part.strip()
+        for part in _raw_video_sources.replace(";", ",").split(",")
+        if part.strip()
+    ]
+elif isinstance(_raw_video_sources, (list, tuple)):
+    _normalized_video_sources = [
+        str(part).strip() for part in _raw_video_sources if str(part).strip()
+    ]
+else:
+    _normalized_video_sources = ["pexels"]
+_allowed_video_sources = {"pexels", "pixabay", "coverr", "local"}
+_normalized_video_sources = [
+    source
+    for source in _normalized_video_sources
+    if source in _allowed_video_sources
+] or ["pexels"]
+# De-duplicate while preserving order.
+_seen_video_sources = set()
+_deduped_video_sources = []
+for _source in _normalized_video_sources:
+    if _source in _seen_video_sources:
+        continue
+    _seen_video_sources.add(_source)
+    _deduped_video_sources.append(_source)
+app["video_sources"] = _deduped_video_sources
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _SynchronizedConfig(_cfg.get("azure", {}))

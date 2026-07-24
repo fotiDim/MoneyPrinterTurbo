@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Cross-platform installation and video generation for the MoneyPrinterTurbo Skill."""
+"""Cross-platform installation and video generation for the MoneyPrinterTurbo Skill.
+
+Forwards CLI options after ``--``, including multi-select material sources such as
+``--video-source local,pexels`` and ``--video-materials /path/logo.png``.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +36,13 @@ PEXELS_API_KEY_HELP_URL = (
     "https://help.pexels.com/hc/en-us/articles/"
     "900004904026-How-do-I-get-an-API-key"
 )
+PIXABAY_API_KEY_URL = "https://pixabay.com/api/docs/"
+COVERR_API_KEY_URL = "https://coverr.co/developers?ctx=header_navigation"
+MATERIAL_SOURCE_SIGNUP_URLS = {
+    "pexels_api_keys": (PEXELS_API_KEY_URL, PEXELS_API_KEY_HELP_URL),
+    "pixabay_api_keys": (PIXABAY_API_KEY_URL, ""),
+    "coverr_api_keys": (COVERR_API_KEY_URL, ""),
+}
 
 # Keep the recommended list focused on commonly used providers. When an LLM
 # key is missing, the helper emits all choices at once to avoid extra turns.
@@ -85,7 +96,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "cli_args",
         nargs=argparse.REMAINDER,
-        help="additional MoneyPrinterTurbo CLI arguments placed after --",
+        help=(
+            "additional MoneyPrinterTurbo CLI arguments placed after -- "
+            "(supports multi-source options such as "
+            "--video-source local,pexels --video-materials ./logo.png)"
+        ),
     )
     args = parser.parse_args(argv)
     args.subject = args.subject.strip()
@@ -274,14 +289,38 @@ def reuse_existing_llm_provider(config_path: Path) -> str:
     return current_provider
 
 
-def selected_video_source(cli_args: list[str]) -> str:
-    """Read the effective material source from forwarded CLI arguments."""
+def selected_video_sources(cli_args: list[str]) -> list[str]:
+    """Read effective material sources from forwarded CLI arguments."""
+    collected: list[str] = []
     for index, item in enumerate(cli_args):
+        raw = ""
         if item == "--video-source" and index + 1 < len(cli_args):
-            return cli_args[index + 1].strip().lower()
-        if item.startswith("--video-source="):
-            return item.split("=", 1)[1].strip().lower()
-    return "pexels"
+            raw = cli_args[index + 1]
+        elif item.startswith("--video-source="):
+            raw = item.split("=", 1)[1]
+        else:
+            continue
+        for part in str(raw).replace(";", ",").split(","):
+            source = part.strip().lower()
+            if source:
+                collected.append(source)
+
+    if not collected:
+        return ["pexels"]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for source in collected:
+        if source in seen:
+            continue
+        normalized.append(source)
+        seen.add(source)
+    return normalized
+
+
+def selected_video_source(cli_args: list[str]) -> str:
+    """Legacy helper: first selected material source."""
+    return selected_video_sources(cli_args)[0]
 
 
 def has_cli_option(cli_args: list[str], option: str) -> bool:
@@ -304,10 +343,12 @@ def missing_config(config_path: Path, cli_args: list[str]) -> tuple[str, list[st
             if not _has_configured_value(_plain_config_value(text, field)):
                 missing.append(field)
 
-    source = selected_video_source(cli_args)
-    if source not in SUPPORTED_SOURCES:
-        raise SkillError(f"unsupported video source: {source}")
-    if source != "local":
+    sources = selected_video_sources(cli_args)
+    for source in sources:
+        if source not in SUPPORTED_SOURCES:
+            raise SkillError(f"unsupported video source: {source}")
+        if source == "local":
+            continue
         value = _plain_config_value(text, f"{source}_api_keys")
         if not _has_configured_value(value):
             missing.append(f"{source}_api_keys")
@@ -334,9 +375,13 @@ def report_missing_config(provider: str, missing: list[str]) -> int:
             "OPENAI_COMPATIBLE_REQUIRED="
             "API key, API base URL, model name"
         )
-    if "pexels_api_keys" in missing:
-        print(f"PEXELS_API_KEY_URL={PEXELS_API_KEY_URL}")
-        print(f"PEXELS_API_KEY_HELP_URL={PEXELS_API_KEY_HELP_URL}")
+    for field, (signup_url, help_url) in MATERIAL_SOURCE_SIGNUP_URLS.items():
+        if field not in missing:
+            continue
+        source = field.removesuffix("_api_keys").upper()
+        print(f"{source}_API_KEY_URL={signup_url}")
+        if help_url:
+            print(f"{source}_API_KEY_HELP_URL={help_url}")
     print("Request only the listed values, set the environment variables, and rerun the same command.")
     return NEEDS_INPUT_EXIT_CODE
 
@@ -388,7 +433,7 @@ def validate_pexels_config(config_path: Path, cli_args: list[str]) -> bool:
     one key is verified, retain only verified keys. If validation is impossible
     because of a transient network failure, keep the original configuration.
     """
-    if selected_video_source(cli_args) != "pexels":
+    if "pexels" not in selected_video_sources(cli_args):
         return True
 
     text = config_path.read_text(encoding="utf-8")

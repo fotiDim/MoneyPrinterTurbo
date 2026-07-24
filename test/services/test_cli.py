@@ -52,6 +52,7 @@ class TestCli(unittest.TestCase):
         materials = params.video_materials
 
         self.assertEqual(params.video_subject, "测试主题")
+        self.assertEqual(params.video_sources, ["local"])
         self.assertEqual(params.video_source, "local")
         self.assertEqual([m.url for m in materials], ["a.mp4", "b.jpg"])
         self.assertTrue(all(m.provider == "local" for m in materials))
@@ -115,7 +116,37 @@ class TestCli(unittest.TestCase):
     def test_coverr_video_source_accepted(self):
         args = cli.parse_args(["--video-subject", "test", "--video-source", "coverr"])
         params = cli.build_video_params(args)
+        self.assertEqual(params.video_sources, ["coverr"])
         self.assertEqual(params.video_source, "coverr")
+
+    def test_multiple_video_sources_accepted(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "test",
+                "--video-source",
+                "local,pexels",
+                "--video-materials",
+                "logo.png",
+            ]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.video_sources, ["local", "pexels"])
+        self.assertEqual([m.url for m in params.video_materials], ["logo.png"])
+
+    def test_repeated_video_source_flags_merge(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "test",
+                "--video-source",
+                "pexels",
+                "--video-source",
+                "pixabay",
+            ]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.video_sources, ["pexels", "pixabay"])
 
     def test_build_video_params_with_script_video_and_audio_options(self):
         args = cli.parse_args(

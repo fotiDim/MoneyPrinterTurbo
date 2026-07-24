@@ -281,6 +281,9 @@
         "HyperFrames Not Ready": "HyperFrames is selected but not ready. Install Node.js 22+, FFmpeg, then run `npx hyperframes browser ensure`.",
         "HyperFrames Ready Help": "Each output video will be rendered from an editable HyperFrames project under the task folder.",
         "HyperFrames Project Ready": "HyperFrames project ready. Open the folder to preview or edit:",
-        "HyperFrames Project Help": "Run `npx hyperframes preview` inside the project folder, or `npx hyperframes render --output out.mp4`."
+        "HyperFrames Project Help": "Run `npx hyperframes preview` inside the project folder, or `npx hyperframes render --output out.mp4`.",
+        "Video Source Multiselect Help": "Выберите один или несколько источников. Сочетайте локальные файлы с онлайн-провайдерами. Опишите порядок в теме или сценарии.",
+        "Video Source Mix Prompt Help": "Чтобы смешать локальные и онлайн-материалы, опишите порядок в этом запросе.",
+        "Upload Local Files Mix Help": "Загрузите логотипы, интро, аутро или клипы. Сохраняйте понятные имена файлов."
     }
 }

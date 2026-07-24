@@ -301,6 +301,63 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     return ""
 
 
+def _search_function_for_source(source: str):
+    source_name = str(source or "pexels").strip().lower()
+    if source_name == "pixabay":
+        return search_videos_pixabay
+    if source_name == "coverr":
+        return search_videos_coverr
+    return search_videos_pexels
+
+
+def _resolve_material_directory(task_id: str) -> str:
+    material_directory = config.app.get("material_directory", "").strip()
+    if material_directory == "task":
+        return utils.task_dir(task_id)
+    if material_directory and not os.path.isdir(material_directory):
+        return ""
+    return material_directory
+
+
+def download_video_for_term(
+    task_id: str,
+    search_term: str,
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    max_clip_duration: int = 5,
+    exclude_urls: set | None = None,
+) -> str:
+    """Search one provider for a term and download the first usable clip."""
+    search_videos = _search_function_for_source(source)
+    material_directory = _resolve_material_directory(task_id)
+    exclude_urls = exclude_urls if exclude_urls is not None else set()
+
+    video_items = search_videos(
+        search_term=search_term,
+        minimum_duration=max_clip_duration,
+        video_aspect=video_aspect,
+    )
+    logger.info(
+        f"found {len(video_items)} videos for '{search_term}' from {source}"
+    )
+    for item in video_items:
+        if item.url in exclude_urls:
+            continue
+        try:
+            saved_video_path = save_video(
+                video_url=item.url, save_dir=material_directory
+            )
+            if saved_video_path:
+                exclude_urls.add(item.url)
+                logger.info(f"video saved: {saved_video_path}")
+                return saved_video_path
+        except Exception as e:
+            logger.error(
+                f"failed to download video: {utils.to_json(item)} => {str(e)}"
+            )
+    return ""
+
+
 def download_videos(
     task_id: str,
     search_terms: List[str],
@@ -310,18 +367,32 @@ def download_videos(
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
     match_script_order: bool = False,
+    sources: List[str] | None = None,
 ) -> List[str]:
-    search_videos = search_videos_pexels
-    if source == "pixabay":
-        search_videos = search_videos_pixabay
-    elif source == "coverr":
-        search_videos = search_videos_coverr
+    provider_sources = [
+        str(item or "").strip().lower()
+        for item in (sources or [source] or ["pexels"])
+        if str(item or "").strip().lower() and str(item).strip().lower() != "local"
+    ]
+    if not provider_sources:
+        provider_sources = [
+            str(source or "pexels").strip().lower() or "pexels"
+        ]
 
-    material_directory = config.app.get("material_directory", "").strip()
-    if material_directory == "task":
-        material_directory = utils.task_dir(task_id)
-    elif material_directory and not os.path.isdir(material_directory):
-        material_directory = ""
+    # Multi-provider fallback: round-robin search terms across selected sources.
+    if len(provider_sources) > 1 and not match_script_order:
+        return _download_videos_from_multiple_sources(
+            task_id=task_id,
+            search_terms=search_terms,
+            sources=provider_sources,
+            video_aspect=video_aspect,
+            video_concat_mode=video_concat_mode,
+            audio_duration=audio_duration,
+            max_clip_duration=max_clip_duration,
+        )
+
+    search_videos = _search_function_for_source(provider_sources[0])
+    material_directory = _resolve_material_directory(task_id)
 
     if match_script_order:
         return _download_videos_by_script_order(
@@ -380,6 +451,75 @@ def download_videos(
         except Exception as e:
             logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
     logger.success(f"downloaded {len(video_paths)} videos")
+    return video_paths
+
+
+def _download_videos_from_multiple_sources(
+    task_id: str,
+    search_terms: List[str],
+    sources: List[str],
+    video_aspect: VideoAspect,
+    video_concat_mode: VideoConcatMode,
+    audio_duration: float,
+    max_clip_duration: int,
+) -> List[str]:
+    """Fan out each search term across providers and merge unique candidates."""
+    logger.info(f"downloading videos from multiple sources: {sources}")
+    material_directory = _resolve_material_directory(task_id)
+    valid_video_items = []
+    valid_video_urls = set()
+    found_duration = 0.0
+
+    for index, search_term in enumerate(search_terms or []):
+        # Round-robin which provider is tried first for each term.
+        ordered_sources = sources[index % len(sources) :] + sources[: index % len(sources)]
+        for source_name in ordered_sources:
+            search_videos = _search_function_for_source(source_name)
+            video_items = search_videos(
+                search_term=search_term,
+                minimum_duration=max_clip_duration,
+                video_aspect=video_aspect,
+            )
+            logger.info(
+                f"found {len(video_items)} videos for '{search_term}' from {source_name}"
+            )
+            for item in video_items:
+                if item.url in valid_video_urls:
+                    continue
+                valid_video_items.append(item)
+                valid_video_urls.add(item.url)
+                found_duration += item.duration
+
+    logger.info(
+        f"found total multi-source videos: {len(valid_video_items)}, "
+        f"required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
+    )
+
+    concat_mode_value = getattr(video_concat_mode, "value", video_concat_mode)
+    if concat_mode_value == VideoConcatMode.random.value:
+        random.shuffle(valid_video_items)
+
+    video_paths = []
+    total_duration = 0.0
+    for item in valid_video_items:
+        try:
+            logger.info(f"downloading video: {item.url}")
+            saved_video_path = save_video(
+                video_url=item.url, save_dir=material_directory
+            )
+            if saved_video_path:
+                logger.info(f"video saved: {saved_video_path}")
+                video_paths.append(saved_video_path)
+                total_duration += min(max_clip_duration, item.duration)
+                if total_duration > audio_duration:
+                    logger.info(
+                        f"total duration of downloaded videos: {total_duration} seconds, skip downloading more"
+                    )
+                    break
+        except Exception as e:
+            logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
+
+    logger.success(f"downloaded {len(video_paths)} multi-source videos")
     return video_paths
 
 

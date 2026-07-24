@@ -26,6 +26,26 @@ The user only needs to provide a video topic or script. Complete installation, c
 
 Unless the user requests otherwise, generate one Chinese `9:16` portrait video with Pexels footage, the default Chinese Edge TTS voice, subtitles, and background music. Install MoneyPrinterTurbo under the user's home directory.
 
+## Material Sources
+
+MoneyPrinterTurbo accepts one or more material sources: `pexels`, `pixabay`, `coverr`, and `local`.
+
+- Default remains a single online source (`pexels`) unless the user asks otherwise.
+- Users may mix sources, for example local uploads with Pexels, or several online libraries together.
+- How mixed materials are combined is defined by the user's topic/script prompt. Prefer clear ordering language such as “open with logo.png, then office B-roll, close with ending.mp4”.
+- Keep meaningful local filenames so the planner can match them to the prompt.
+- Forward multi-source options after `--`. Examples:
+
+```bash
+uv run --no-project --python 3.11 python mpt_agent.py --subject "Open with logo.png then office B-roll" -- --video-source local,pexels --video-materials "/absolute/path/logo.png"
+```
+
+```bash
+uv run --no-project --python 3.11 python mpt_agent.py --subject "City nightlife" -- --video-source pexels,pixabay
+```
+
+When `local` is included, require `--video-materials` with existing local image/video paths. Request API keys only for the online sources actually selected.
+
 ## Execution
 
 ### 1. Locate the helper
@@ -99,7 +119,7 @@ Summary: Chinese portrait video with voice-over, subtitles, and background music
 
 ### Exit code 10: request credentials once
 
-`MPT_NEEDS_INPUT` includes only the required fields, recommended LLM providers and signup links, custom OpenAI-compatible requirements, and the Pexels signup link. Ask only for the listed values and do not request credentials already found in `config.toml`.
+`MPT_NEEDS_INPUT` includes only the required fields, recommended LLM providers and signup links, custom OpenAI-compatible requirements, and signup links for any missing material-source API keys (for example Pexels). Ask only for the listed values and do not request credentials already found in `config.toml`.
 
 After the user responds, rerun the same foreground command with only the required environment variables:
 
@@ -111,6 +131,8 @@ MPT_LLM_MODEL_NAME
 MPT_PEXELS_API_KEY
 ```
 
+If another online source was selected and is missing keys, ask for that provider’s key as listed in `MISSING=` (for example `pixabay_api_keys` or `coverr_api_keys`) and write it into `config.toml` through the helper’s normal environment/config path rather than inventing new variables.
+
 ### Exit code 1: repair or report
 
 Use `MPT_ERROR` and `LOG_FILE` to repair a recoverable problem and retry once. Ask the user only if the repair requires a new API key. If the retry fails, report the failed stage, a short error, and the log path.
@@ -119,7 +141,7 @@ A terminal-tool path validation error is not a video-generation failure because 
 
 ## Configuration and Background Fallback
 
-The helper may read the complete local `config.toml` to reuse existing settings, but it must never print its contents. It reuses a working LLM provider automatically and validates configured Pexels keys through the authenticated My Collections endpoint before generation.
+The helper may read the complete local `config.toml` to reuse existing settings, but it must never print its contents. It reuses a working LLM provider automatically. When Pexels is among the selected sources, it validates configured Pexels keys through the authenticated My Collections endpoint before generation.
 
 Use background mode only if the agent platform cannot wait for a foreground process. Wait for the platform's process-completion notification without polling, then read `latest-result.json` once.
 
@@ -129,4 +151,4 @@ Use background mode only if the agent platform cannot wait for a foreground proc
 - Use uv and the MoneyPrinterTurbo CLI only.
 - Do not start Docker, WebUI, or API services.
 - Do not run multiple video jobs concurrently.
-- Pass additional video requirements after `--`. Run `cli.py --help` once only when an unfamiliar option must be verified.
+- Pass additional video requirements after `--`, including multi-source options such as `--video-source local,pexels` and `--video-materials`. Run `cli.py --help` once only when an unfamiliar option must be verified.

@@ -126,6 +126,40 @@ def _bgm_type(value: str) -> str:
     )
 
 
+def _parse_video_sources(raw_values: Sequence[str] | None) -> list[str]:
+    """Normalize repeated/comma-separated --video-source values."""
+    allowed = {"pexels", "pixabay", "coverr", "local"}
+    if not raw_values:
+        return ["pexels"]
+
+    items: list[str] = []
+    for value in raw_values:
+        for part in str(value or "").replace(";", ",").split(","):
+            source = part.strip().lower()
+            if source:
+                items.append(source)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    invalid: list[str] = []
+    for source in items:
+        if source not in allowed:
+            invalid.append(source)
+            continue
+        if source in seen:
+            continue
+        normalized.append(source)
+        seen.add(source)
+
+    if invalid:
+        raise ValueError(
+            "unsupported --video-source value(s): "
+            + ", ".join(sorted(set(invalid)))
+            + "; allowed: pexels, pixabay, coverr, local"
+        )
+    return normalized or ["pexels"]
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -144,6 +178,10 @@ Examples:
     uv run python cli.py --video-subject "How AI is changing everyday life" \\
       --video-source local --video-materials "./1.mp4,./2.mp4"
 
+  Mix local uploads with online stock (combination follows the subject/script prompt):
+    uv run python cli.py --video-subject "Open with logo.png then office B-roll" \\
+      --video-source local,pexels --video-materials "./logo.png"
+
   Generate with a prepared script and no voiceover:
     uv run python cli.py --video-script "Your complete script" \\
       --voice-name no-voice --stop-at video
@@ -153,7 +191,7 @@ Examples:
 
 Pipeline stages:
   script     Generate or return the script.
-  terms      Generate material search terms; unavailable with local materials.
+  terms      Generate material search terms; unavailable with local-only materials.
   audio      Generate TTS, silent audio, or use --custom-audio-file.
   subtitle   Generate subtitles when enabled.
   materials  Download online materials or preprocess local files.
@@ -211,18 +249,25 @@ Output and exit status:
     material_group = parser.add_argument_group("materials and pipeline")
     material_group.add_argument(
         "--video-source",
-        default="pexels",
-        choices=["pexels", "pixabay", "coverr", "local"],
-        help="video material provider; online providers require matching API keys in config.toml",
+        action="append",
+        dest="video_sources",
+        default=None,
+        metavar="SOURCE",
+        help=(
+            "material provider; repeat or pass comma-separated values "
+            "(pexels, pixabay, coverr, local). Online providers require matching "
+            "API keys in config.toml. Default: pexels"
+        ),
     )
     material_group.add_argument(
         "--video-materials",
         default="",
         metavar="PATH[,PATH...]",
         help=(
-            "comma-separated local image/video paths for --video-source local; relative "
-            "paths use the current working directory, then storage/local_videos as a "
-            "compatibility fallback; absolute paths are accepted"
+            "comma-separated local image/video paths when local is included in "
+            "--video-source; relative paths use the current working directory, "
+            "then storage/local_videos as a compatibility fallback; absolute "
+            "paths are accepted"
         ),
     )
     material_group.add_argument(
@@ -451,21 +496,31 @@ Output and exit status:
     if not args.video_subject.strip() and not args.video_script.strip():
         parser.error("one of --video-subject or --video-script is required")
 
-    if args.video_source == "local" and args.stop_at == "terms":
+    try:
+        args.video_sources = _parse_video_sources(args.video_sources)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    local_only = args.video_sources == ["local"]
+    includes_local = "local" in args.video_sources
+
+    if local_only and args.stop_at == "terms":
         parser.error(
             "--stop-at terms has no effect with --video-source local "
-            "(search terms are not generated for local sources)"
+            "(search terms are not generated for local-only sources)"
         )
 
     stage_requires_materials = args.stop_at in {"materials", "video"}
     has_video_materials = bool((args.video_materials or "").strip())
-    if args.video_source == "local" and stage_requires_materials and not has_video_materials:
+    if includes_local and stage_requires_materials and not has_video_materials:
         parser.error(
-            "--video-materials is required with --video-source local when "
-            "--stop-at is materials or video"
+            "--video-materials is required when local is included in "
+            "--video-source and --stop-at is materials or video"
         )
-    if args.video_source != "local" and has_video_materials:
-        parser.error("--video-materials can only be used with --video-source local")
+    if has_video_materials and not includes_local:
+        parser.error(
+            "--video-materials can only be used when local is included in --video-source"
+        )
 
     if args.bgm_file:
         if args.bgm_type in (None, "custom"):
@@ -513,7 +568,12 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
     if materials_arg.strip():
         video_materials = [
             # Actual duration will be detected during video processing; use 0 as placeholder.
-            MaterialInfo(provider="local", url=item.strip(), duration=0)
+            MaterialInfo(
+                provider="local",
+                url=item.strip(),
+                duration=0,
+                name=os.path.basename(item.strip().replace("\\", "/")),
+            )
             for item in materials_arg.split(",")
             if item.strip()
         ]
@@ -522,7 +582,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_subject": args.video_subject.strip(),
         "video_script": args.video_script,
         "video_terms": video_terms,
-        "video_source": args.video_source,
+        "video_sources": list(args.video_sources),
         "video_materials": video_materials,
         "video_count": args.video_count,
         "video_aspect": args.video_aspect,
@@ -713,7 +773,10 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
         # 下游根据 resource/fonts 内的文件名拼接路径，因此仍保留纯文件名。
         params.font_name = os.path.basename(font_path)
 
-    if params.video_source != "local" or stop_at not in {"materials", "video"}:
+    if "local" not in (params.video_sources or []) or stop_at not in {
+        "materials",
+        "video",
+    }:
         return
 
     local_videos_dir = utils.storage_dir("local_videos", create=True)
@@ -742,18 +805,28 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
             if _path_is_within_directory(source_path, local_videos_dir):
                 prepared_path = source_path
             else:
-                prepared_path = os.path.join(
-                    local_videos_dir,
-                    f"cli-material-{uuid4().hex}{extension}",
-                )
-                shutil.copy2(source_path, prepared_path)
+                original_name = os.path.basename(source_path)
+                safe_stem = re.sub(
+                    r"[^\w.\-]+", "_", os.path.splitext(original_name)[0]
+                ).strip("._") or "cli-material"
+                candidate = os.path.join(local_videos_dir, f"{safe_stem}{extension}")
+                suffix = 1
+                while os.path.exists(candidate):
+                    candidate = os.path.join(
+                        local_videos_dir, f"{safe_stem}-{suffix}{extension}"
+                    )
+                    suffix += 1
+                shutil.copy2(source_path, candidate)
                 logger.info(
                     "copied CLI local material into managed storage: "
-                    f"source={source_path}, target={prepared_path}"
+                    f"source={source_path}, target={candidate}"
                 )
+                prepared_path = candidate
             prepared_paths[source_path] = prepared_path
 
         material.url = prepared_path
+        if not getattr(material, "name", ""):
+            material.name = os.path.basename(prepared_path)
 
 
 def run_cli(argv: Sequence[str] | None = None) -> int:

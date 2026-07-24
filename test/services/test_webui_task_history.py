@@ -9,6 +9,8 @@ ROOT_DIR = Path(__file__).parent.parent.parent
 WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
 TASK_HISTORY_HELPERS = {
     "_find_final_task_video",
+    "_params_include_local_source",
+    "_normalize_source_selection",
     "_build_restore_upload_requirements",
     "_get_unmet_restore_upload_requirements",
 }

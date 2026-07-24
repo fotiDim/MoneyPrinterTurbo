@@ -128,6 +128,7 @@
 - [x] 支持 **字幕生成**，可调整字体、位置、颜色、大小、描边和背景样式
 - [x] 支持 **背景音乐**，可随机选择或使用指定音乐，并调整音量
 - [x] 支持使用自己的 **本地素材**，也可从 **Pexels**、**Pixabay** 和 **Coverr** 获取可免费使用的高清素材
+- [x] 支持 **多选素材来源**，可将本地文件与多个在线素材库混合；在视频主题/文案中说明组合方式（例如先用 logo，中间用库存镜头，最后用片尾），由大模型按提示词规划素材顺序
 - [x] 支持 **Kimi / Moonshot AI**、**OpenAI**、**Google Gemini**、**DeepSeek**、**阿里云通义千问**、**Microsoft Azure OpenAI**、**火山引擎方舟**、**xAI Grok**、**MiniMax**、**小米 MiMo** 等主流模型服务，并兼容 **Cloudflare AI Gateway**、**魔搭 ModelScope**、**AIHubMix**、**AIML API**、**EvoLink**、**Ollama**、**OneAPI**、**LiteLLM**、**Groq**、**Pollinations AI** 等统一网关、聚合平台和本地运行环境
 - [x] 支持一键 **跨平台发布**，生成完成后可自动上传至 **TikTok**、**Instagram** 和 **YouTube Shorts**
 
@@ -233,7 +234,7 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 
 #### ② 配置项目（可选）
 
-首次启动时，项目会根据 `config.example.toml` 自动创建 `config.toml`。大模型 Provider、素材来源和相关 API Key 可以直接在 WebUI 的基础设置中配置。
+首次启动时，项目会根据 `config.example.toml` 自动创建 `config.toml`。大模型 Provider、素材来源（可多选）和相关 API Key 可以直接在 WebUI 的基础设置中配置。
 
 ### Docker 部署 🐳
 
@@ -342,6 +343,17 @@ python main.py
 ```shell
 uv run python cli.py --video-subject "人工智能如何改变日常生活"
 ```
+
+也可以一次选择多个素材来源。本地与在线混合时，请在主题或文案中说明组合顺序（例如先 logo、中间库存镜头、最后片尾）：
+
+```shell
+uv run python cli.py \
+  --video-subject "先用 logo.png 开场，再用办公室 B-roll，最后用 ending.mp4 收尾" \
+  --video-source local,pexels \
+  --video-materials "./logo.png,./ending.mp4"
+```
+
+`--video-source` 支持逗号分隔或重复传入（`pexels`、`pixabay`、`coverr`、`local`）。只要包含 `local`，即可配合 `--video-materials` 使用。
 
 如需查看完整命令、参数说明和使用方法，可以执行：
 
